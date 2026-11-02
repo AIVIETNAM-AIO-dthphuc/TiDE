@@ -13,12 +13,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Main training code."""
+"""TiDE training with epoch-boundary TensorFlow checkpoints and optional rclone backup.
+
+Compatible with the supplied drive_backup.py and the original TiDE absl flags.
+Example (run from the TiDE source directory after configuring rclone):
+
+  python train.py --dataset=elec --hist_len=720 --pred_len=336 \\
+      --random_seed=1 --drive_backup=true
+
+Equivalent convenience flags: --dataset=electricity --horizon=336 --seed=1.
+
+Resume is automatic when --resume=true (default); independent fresh runs
+should specify a unique --run_id and --resume=false.
+"""
 
 import json
 import os
+from pathlib import Path
 import random
-import string
+import re
 import sys
 
 from absl import app
@@ -34,46 +47,50 @@ from tqdm import tqdm
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_integer('train_epochs', 100, 'Number of epochs to train')
+# Original TiDE flags; leave the optimization / dataset defaults unchanged.
+flags.DEFINE_integer('train_epochs', 100, 'Number of epochs to train (original loop includes epoch 0)')
 flags.DEFINE_integer('patience', 40, 'Patience for early stopping')
-flags.DEFINE_integer('epoch_len', None, 'number of iterations in an epoch')
-flags.DEFINE_integer(
-    'batch_size', 512, 'Batch size for the randomly sampled batch'
-)
+flags.DEFINE_integer('epoch_len', None, 'Number of iterations in an epoch')
+flags.DEFINE_integer('batch_size', 512, 'Batch size for the randomly sampled batch')
 flags.DEFINE_float('learning_rate', 1e-4, 'Learning rate')
-
-
-# Non tunable flags
-flags.DEFINE_string(
-    'expt_dir',
-    './results',
-    'The name of the experiment dir',
-)
-flags.DEFINE_string('dataset', 'elec', 'The name of the dataset.')
-flags.DEFINE_string('datetime_col', 'date', 'Column having datetime.')
-flags.DEFINE_list('num_cov_cols', None, 'Column having numerical features.')
-flags.DEFINE_list('cat_cov_cols', None, 'Column having categorical features.')
-flags.DEFINE_integer('hist_len', 720, 'Length of the history provided as input')
-flags.DEFINE_integer('pred_len', 720, 'Length of pred len during training')
+flags.DEFINE_string('expt_dir', './results', 'Optional TensorBoard root (legacy flag)')
+flags.DEFINE_string('dataset', 'elec', 'Dataset key (elec or electricity, traffic, etc.)')
+flags.DEFINE_string('datetime_col', 'date', 'Column containing datetimes')
+flags.DEFINE_list('num_cov_cols', None, 'Numerical covariate columns')
+flags.DEFINE_list('cat_cov_cols', None, 'Categorical covariate columns')
+flags.DEFINE_integer('hist_len', 720, 'Lookback/history length')
+flags.DEFINE_integer('pred_len', 720, 'Forecasting horizon')
 flags.DEFINE_integer('num_layers', 2, 'Number of DNN layers')
 flags.DEFINE_integer('hidden_size', 256, 'Hidden size of DNN')
-flags.DEFINE_integer('decoder_output_dim', 4, 'Hidden d3 of DNN')
-flags.DEFINE_integer('final_decoder_hidden', 64, 'Hidden d3 of DNN')
+flags.DEFINE_integer('decoder_output_dim', 4, 'Decoder output dimension')
+flags.DEFINE_integer('final_decoder_hidden', 64, 'Final decoder hidden dimension')
 flags.DEFINE_list('ts_cols', None, 'Columns of time-series features')
-flags.DEFINE_integer(
-    'random_seed', None, 'The random seed to be used for TF and numpy'
-)
-flags.DEFINE_bool('normalize', True, 'normalize data for training or not')
-flags.DEFINE_bool('holiday', False, 'use holiday features or not')
-flags.DEFINE_bool('permute', True, 'permute the order of TS in training set')
-flags.DEFINE_bool('transform', False, 'Apply chronoml transform or not.')
-flags.DEFINE_bool('layer_norm', False, 'Apply layer norm or not.')
-flags.DEFINE_float('dropout_rate', 0.0, 'dropout rate')
-flags.DEFINE_integer('num_split', 1, 'number of splits during inference.')
-flags.DEFINE_integer(
-    'min_num_epochs', 0, 'minimum number of epochs before early stopping'
-)
-flags.DEFINE_integer('gpu', 0, 'index of gpu to be used.')
+flags.DEFINE_integer('random_seed', None, 'Random seed for TF and NumPy')
+flags.DEFINE_bool('normalize', True, 'Normalize data for training')
+flags.DEFINE_bool('holiday', False, 'Use holiday features')
+flags.DEFINE_bool('permute', True, 'Permute series during training')
+flags.DEFINE_bool('transform', False, 'Apply reversible transform')
+flags.DEFINE_bool('layer_norm', False, 'Apply layer norm')
+flags.DEFINE_float('dropout_rate', 0.0, 'Dropout rate')
+flags.DEFINE_integer('num_split', 1, 'Number of splits during inference')
+flags.DEFINE_integer('min_num_epochs', 0, 'Minimum epochs before early stopping')
+flags.DEFINE_integer('gpu', 0, 'GPU index; CPU is used if no GPU is available')
+
+# Convenience arguments for notebook launches (aliases of original flags).
+flags.DEFINE_integer('seed', None, 'Alias for --random_seed')
+flags.DEFINE_integer('horizon', None, 'Alias for --pred_len')
+
+# Checkpoint and Google Drive integration.
+flags.DEFINE_bool('drive_backup', False, 'Enable rclone upload/restore to/from Drive')
+flags.DEFINE_bool('resume', True, 'Resume the local or Google Drive checkpoint if found')
+flags.DEFINE_integer('backup_every', 1, 'Upload once every N finished epochs')
+flags.DEFINE_integer('max_to_keep', 2, 'Max local TF checkpoints retained')
+flags.DEFINE_string('run_id', None, 'Optional unique ID for a separate independent run')
+flags.DEFINE_string('local_base', '/kaggle/working/IS403_Experiment',
+                    'Local experiment root for checkpoints and results')
+flags.DEFINE_string('remote_base',
+                    'gdrive:[54] IS403 - BA/[1] PROJECT/[IS403]_Experiment',
+                    'Google Drive remote experiment root')
 
 DATA_DICT = {
     'ettm2': {
@@ -113,45 +130,172 @@ DATA_DICT = {
     },
 }
 
-np.random.seed(1024)
-tf.random.set_seed(1024)
+
+def _resolve_arguments():
+  """Resolve notebook-friendly aliases without changing original TiDE flags."""
+  if FLAGS.seed is not None:
+    if FLAGS['random_seed'].present and FLAGS.random_seed != FLAGS.seed:
+      raise ValueError('--seed and --random_seed disagree.')
+    FLAGS.random_seed = FLAGS.seed
+  if FLAGS.horizon is not None:
+    if FLAGS['pred_len'].present and FLAGS.pred_len != FLAGS.horizon:
+      raise ValueError('--horizon and --pred_len disagree.')
+    FLAGS.pred_len = FLAGS.horizon
+
+  FLAGS.dataset = FLAGS.dataset.lower()
+  if FLAGS.dataset == 'electricity':
+    FLAGS.dataset = 'elec'  # Official source name; Drive uses 'electricity'.
+  if FLAGS.dataset not in DATA_DICT:
+    raise ValueError(f'Unknown dataset {FLAGS.dataset!r}. Choose one of {list(DATA_DICT)}')
+  if FLAGS.random_seed is None or FLAGS.random_seed <= 0:
+    raise ValueError('Provide --random_seed=N (or --seed=N), with N > 0.')
+  if FLAGS.pred_len not in (96, 192, 336, 720):
+    raise ValueError('Horizon must be one of 96, 192, 336, 720.')
+  if FLAGS.backup_every < 1 or FLAGS.max_to_keep < 1:
+    raise ValueError('--backup_every and --max_to_keep must be positive integers.')
+  if FLAGS.train_epochs < 0:
+    raise ValueError('--train_epochs cannot be negative.')
+  if FLAGS.run_id is not None and not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', FLAGS.run_id):
+    raise ValueError('--run_id must contain 1-64 letters, digits, underscores or hyphens.')
+  return 'electricity' if FLAGS.dataset == 'elec' else FLAGS.dataset
 
 
-def _get_random_string(num_chars):
-  rand_str = ''.join(
-      random.choice(
-          string.ascii_uppercase + string.ascii_lowercase + string.digits
-      )
-      for _ in range(num_chars - 1)
+def _run_config():
+  """Fields that must not silently change when resuming a training run."""
+  keys = (
+      'dataset', 'random_seed', 'hist_len', 'pred_len', 'batch_size',
+      'learning_rate', 'num_layers', 'hidden_size', 'decoder_output_dim',
+      'final_decoder_hidden', 'datetime_col', 'ts_cols', 'num_cov_cols',
+      'cat_cov_cols', 'epoch_len', 'normalize', 'holiday', 'permute',
+      'transform', 'layer_norm', 'dropout_rate', 'num_split',
+      'min_num_epochs', 'patience', 'train_epochs',
   )
-  return rand_str
+  config = {key: getattr(FLAGS, key) for key in keys}
+  config['run_id'] = FLAGS.run_id
+  return config
+
+
+def _verify_or_write_config(folder: Path, config: dict):
+  """Reject incompatible checkpoints before loading any model/optimizer state."""
+  config_file = folder / 'run_config.json'
+  if config_file.exists():
+    existing = json.loads(config_file.read_text(encoding='utf-8'))
+    if existing != config:
+      differences = sorted(k for k in config if existing.get(k) != config[k])
+      raise ValueError(
+          f'Checkpoint configuration does not match current run: {differences}. '
+          'Use the original hyperparameters or a NEW --run_id and --resume=false.'
+      )
+  else:
+    # An existing TF checkpoint without metadata cannot be validated safely.
+    if tf.train.latest_checkpoint(str(folder)):
+      raise RuntimeError(f'Missing run_config.json for existing checkpoint: {folder}')
+    folder.mkdir(parents=True, exist_ok=True)
+    temp = folder / 'run_config.json.tmp'
+    temp.write_text(json.dumps(config, indent=2, sort_keys=True), encoding='utf-8')
+    os.replace(temp, config_file)
+
+
+def _configure_device():
+  gpus = tf.config.list_physical_devices('GPU')
+  if not gpus:
+    logging.warning('No GPU detected; training will run on CPU.')
+    return
+  if FLAGS.gpu < 0 or FLAGS.gpu >= len(gpus):
+    raise ValueError(f'--gpu={FLAGS.gpu} invalid: found {len(gpus)} GPU(s).')
+  tf.config.set_visible_devices(gpus[FLAGS.gpu], 'GPU')
+  try:
+    tf.config.experimental.set_memory_growth(gpus[FLAGS.gpu], True)
+  except RuntimeError as error:
+    logging.warning('GPU memory growth not changed: %s', error)
+
+
+def _build_model_and_optimizer(model, optimizer, data):
+  """Create Keras variables/optimizer slots BEFORE restoring their values."""
+  sample = next(iter(data.tf_dataset(mode='train')))
+  model((sample[:3], sample[4:6], sample[-1]), training=False)
+  optimizer.build(model.trainable_variables)
+
+
+def _save_best_outputs(expt_dir, val_res, test_res, test_metrics):
+  expt_dir.mkdir(parents=True, exist_ok=True)
+  with open(expt_dir / 'val_pred.npy', 'wb') as fp:
+    np.save(fp, val_res[0][:, 0:-1:FLAGS.pred_len])
+  with open(expt_dir / 'val_true.npy', 'wb') as fp:
+    np.save(fp, val_res[1][:, 0:-1:FLAGS.pred_len])
+  with open(expt_dir / 'test_pred.npy', 'wb') as fp:
+    np.save(fp, test_res[0][:, 0:-1:FLAGS.pred_len])
+  with open(expt_dir / 'test_true.npy', 'wb') as fp:
+    np.save(fp, test_res[1][:, 0:-1:FLAGS.pred_len])
+  with open(expt_dir / 'test_metrics.json', 'w', encoding='utf-8') as fp:
+    json.dump({key: float(value) for key, value in test_metrics.items()}, fp, indent=2)
 
 
 def training():
-  """Training TS code."""
+  """Official TiDE training loop with resumable end-of-epoch checkpoints."""
+  drive_dataset = _resolve_arguments()
+  _configure_device()
   tf.random.set_seed(FLAGS.random_seed)
   np.random.seed(FLAGS.random_seed)
+  random.seed(FLAGS.random_seed)
 
-  gpus = tf.config.experimental.list_physical_devices('GPU')
-  tf.config.experimental.set_visible_devices(gpus[FLAGS.gpu], 'GPU')
-  if gpus:
-    try:
-      for gpu in gpus:
-        tf.config.experimental.set_memory_growth(gpu, True)
-    except RuntimeError as e:
-      print(e)
+  # Import does not initialize rclone; it is only required if enabled.
+  from drive_backup import DriveBackup
 
-  experiment_id = _get_random_string(8)
-  logging.info('Experiment id: %s', experiment_id)
+  backup = None
+  if FLAGS.drive_backup:
+    backup = DriveBackup(
+        dataset=drive_dataset,
+        seed=FLAGS.random_seed,
+        horizon=FLAGS.pred_len,
+        run_id=FLAGS.run_id,
+        local_base=FLAGS.local_base,
+        remote_base=FLAGS.remote_base,
+    )
+    backup.check_connection()  # Fail before expensive training if Drive is unavailable.
+
+  run_root = (
+      Path(FLAGS.local_base) / drive_dataset /
+      f'seed_{FLAGS.random_seed}' / f'H{FLAGS.pred_len}'
+  )
+  ckpt_dir = run_root / 'checkpoints'
+  results_dir = run_root / 'results'
+  if FLAGS.run_id:
+    ckpt_dir = ckpt_dir / 'runs' / FLAGS.run_id
+    results_dir = results_dir / 'runs' / FLAGS.run_id
+
+  # Determine whether to resume. Never overwrite existing checkpoints silently.
+  remote_info = None
+  local_ckpt = tf.train.latest_checkpoint(str(ckpt_dir))
+  if FLAGS.resume:
+    if local_ckpt:
+      logging.info('Using local checkpoint: %s', local_ckpt)
+    elif backup:
+      remote_info = backup.restore_latest_checkpoint(checkpoint_dir=ckpt_dir)
+      logging.info('Remote restore: %s', remote_info or 'no existing snapshot')
+  else:
+    if local_ckpt:
+      raise RuntimeError(
+          f'Existing local checkpoint at {ckpt_dir}. '
+          'Use --resume=true, or choose a unique --run_id.'
+      )
+    if backup and backup.list_completed_snapshots():
+      raise RuntimeError(
+          'A completed Drive snapshot already exists for this dataset/seed/horizon/run_id. '
+          'Use --resume=true or choose a different --run_id.'
+      )
+
+  _verify_or_write_config(ckpt_dir, _run_config())
+  results_dir.mkdir(parents=True, exist_ok=True)
 
   dataset = FLAGS.dataset
   data_path = DATA_DICT[dataset]['data_path']
   freq = DATA_DICT[dataset]['freq']
   boundaries = DATA_DICT[dataset]['boundaries']
-
-  data_df = pd.read_csv(open(data_path, 'r'))
+  data_df = pd.read_csv(data_path)
 
   if FLAGS.ts_cols:
+    # Keep the original TiDE behavior: optional dataset metadata is in DATA_DICT.
     ts_cols = DATA_DICT[dataset]['ts_cols']
     num_cov_cols = DATA_DICT[dataset]['num_cov_cols']
     cat_cov_cols = DATA_DICT[dataset]['cat_cov_cols']
@@ -159,7 +303,7 @@ def training():
     ts_cols = [col for col in data_df.columns if col != FLAGS.datetime_col]
     num_cov_cols = None
     cat_cov_cols = None
-  permute = FLAGS.permute
+
   dtl = data_loader.TimeSeriesdata(
       data_path=data_path,
       datetime_col=FLAGS.datetime_col,
@@ -176,10 +320,9 @@ def training():
       normalize=FLAGS.normalize,
       epoch_len=FLAGS.epoch_len,
       holiday=FLAGS.holiday,
-      permute=permute,
+      permute=FLAGS.permute,
   )
 
-  # Create model
   model_config = {
       'model_type': 'dnn',
       'hidden_dims': [FLAGS.hidden_size] * FLAGS.num_layers,
@@ -198,30 +341,55 @@ def training():
       dropout_rate=FLAGS.dropout_rate,
   )
 
-  # Compute path to experiment directory
-  expt_dir = os.path.join(
-      FLAGS.expt_dir,
-      FLAGS.dataset + '_' + str(experiment_id) + '_' + str(FLAGS.pred_len),
-  )
-  os.makedirs(expt_dir, exist_ok=True)
-
-  step = tf.Variable(0)
-  # LR scheduling
+  # The decay schedule is unchanged from the supplied original code.
   lr_schedule = keras.optimizers.schedules.CosineDecay(
       initial_learning_rate=FLAGS.learning_rate,
       decay_steps=30 * dtl.train_range[1],
   )
-
   optimizer = keras.optimizers.Adam(learning_rate=lr_schedule, clipvalue=1e3)
-  summary = Summary(expt_dir)
 
-  best_loss = np.inf
-  pat = 0
-  mean_loss_array = []
-  iter_array = []
-  # best_check_path = None
-  while step.numpy() < FLAGS.train_epochs + 1:
-    ep = step.numpy()
+  epoch_counter = tf.Variable(0, dtype=tf.int64, trainable=False, name='completed_epochs')
+  best_rmse = tf.Variable(np.inf, dtype=tf.float64, trainable=False, name='best_rmse')
+  patience_counter = tf.Variable(0, dtype=tf.int64, trainable=False, name='patience_counter')
+  finished = tf.Variable(False, dtype=tf.bool, trainable=False, name='finished')
+
+  _build_model_and_optimizer(model, optimizer, dtl)
+  checkpoint = tf.train.Checkpoint(
+      model=model,
+      optimizer=optimizer,
+      epoch=epoch_counter,
+      best_rmse=best_rmse,
+      patience=patience_counter,
+      finished=finished,
+  )
+  manager = tf.train.CheckpointManager(
+      checkpoint, directory=str(ckpt_dir), max_to_keep=FLAGS.max_to_keep
+  )
+  if FLAGS.resume and manager.latest_checkpoint:
+    status = checkpoint.restore(manager.latest_checkpoint)
+    # All model and optimizer variables were created before restore.
+    status.assert_existing_objects_matched()
+    logging.info('RESUMED: %s; completed_epochs=%d; best_rmse=%.6f; patience=%d',
+                 manager.latest_checkpoint, int(epoch_counter.numpy()),
+                 float(best_rmse.numpy()), int(patience_counter.numpy()))
+    if remote_info is not None and remote_info['epoch'] != int(epoch_counter.numpy()):
+      raise RuntimeError('Drive snapshot metadata epoch disagrees with TF checkpoint epoch.')
+
+  logging.info('Run: dataset=%s seed=%d H=%d local=%s remote=%s',
+               drive_dataset, FLAGS.random_seed, FLAGS.pred_len, ckpt_dir,
+               backup.remote_snapshots if backup else '[disabled]')
+  if bool(finished.numpy()):
+    logging.info('This run is already marked complete. No further training performed.')
+    return
+
+  log_dir = results_dir / 'tensorboard'
+  if FLAGS['expt_dir'].present:
+    log_dir = Path(FLAGS.expt_dir) / f'{drive_dataset}_seed{FLAGS.random_seed}_H{FLAGS.pred_len}'
+  summary = Summary(str(log_dir))
+
+  # Preserve original TiDE loop bound (epochs numbered 0 ... train_epochs).
+  while int(epoch_counter.numpy()) < FLAGS.train_epochs + 1:
+    ep = int(epoch_counter.numpy())
     logging.info('Epoch %s', ep)
     sys.stdout.flush()
 
@@ -233,51 +401,57 @@ def training():
       loss = model.train_step(
           past_data, future_features, batch[3], tsidx, optimizer
       )
-      # Train metrics
       summary.update({'train/reg_loss': loss, 'train/loss': loss})
       if i % 100 == 0:
         mean_loss = summary.metric_dict['train/reg_loss'].result().numpy()
-        mean_loss_array.append(mean_loss)
-        iter_array.append(i)
         iterator.set_description(f'Loss {mean_loss:.4f}')
-    step.assign_add(1)
-    # Test metrics
-    val_metrics, val_res, val_loss = model.eval(
-        dtl, 'val', num_split=FLAGS.num_split
-    )
-    test_metrics, test_res, test_loss = model.eval(
-        dtl, 'test', num_split=FLAGS.num_split
-    )
-    logging.info('Val Loss: %s', val_loss)
-    logging.info('Test Loss: %s', test_loss)
-    tracked_loss = val_metrics['rmse']
-    if tracked_loss < best_loss and ep > FLAGS.min_num_epochs:
-      best_loss = tracked_loss
-      pat = 0
 
-      with open(os.path.join(expt_dir, 'val_pred.npy'), 'wb') as fp:
-        np.save(fp, val_res[0][:, 0 : -1 : FLAGS.pred_len])
-      with open(os.path.join(expt_dir, 'val_true.npy'), 'wb') as fp:
-        np.save(fp, val_res[1][:, 0 : -1 : FLAGS.pred_len])
+    epoch_counter.assign_add(1)
+    val_metrics, val_res, val_loss = model.eval(dtl, 'val', num_split=FLAGS.num_split)
+    test_metrics, test_res, test_loss = model.eval(dtl, 'test', num_split=FLAGS.num_split)
+    logging.info('Val Loss: %s, Test Loss: %s', val_loss, test_loss)
 
-      with open(os.path.join(expt_dir, 'test_pred.npy'), 'wb') as fp:
-        np.save(fp, test_res[0][:, 0 : -1 : FLAGS.pred_len])
-      with open(os.path.join(expt_dir, 'test_true.npy'), 'wb') as fp:
-        np.save(fp, test_res[1][:, 0 : -1 : FLAGS.pred_len])
-      with open(os.path.join(expt_dir, 'test_metrics.json'), 'w') as fp:
-        json.dump(test_metrics, fp)
-      logging.info('saved best result so far at %s', expt_dir)
+    tracked_loss = float(val_metrics['rmse'])
+    early_stop = False
+    if tracked_loss < float(best_rmse.numpy()) and ep > FLAGS.min_num_epochs:
+      best_rmse.assign(tracked_loss)
+      patience_counter.assign(0)
+      _save_best_outputs(results_dir, val_res, test_res, test_metrics)
+      logging.info('Saved best results to %s (val RMSE %.6f)', results_dir, tracked_loss)
       logging.info('Test metrics: %s', test_metrics)
+      if backup:
+        # Persist best outputs on each improvement; they must survive an interrupted session.
+        backup.upload_results(results_dir=run_root / 'results')
     else:
-      pat += 1
-      if pat > FLAGS.patience:
+      patience_counter.assign_add(1)
+      if int(patience_counter.numpy()) > FLAGS.patience:
         logging.info('Early stopping')
-        break
-    summary.write(step=step.numpy())
+        early_stop = True
+
+    summary.write(step=int(epoch_counter.numpy()))
+    end_of_training = int(epoch_counter.numpy()) >= FLAGS.train_epochs + 1
+    finished.assign(early_stop or end_of_training)
+
+    # Save the complete epoch state locally BEFORE uploading it to Drive.
+    ckpt_path = manager.save(checkpoint_number=int(epoch_counter.numpy()))
+    logging.info('Saved checkpoint at end of epoch %d: %s',
+                 int(epoch_counter.numpy()), ckpt_path)
+    if backup and (
+        int(epoch_counter.numpy()) % FLAGS.backup_every == 0 or bool(finished.numpy())
+    ):
+      backup.backup_checkpoint(
+          epoch=int(epoch_counter.numpy()), checkpoint_dir=ckpt_dir
+      )
+
+    if early_stop:
+      break
+
+  logging.info('Training ended at completed_epochs=%d, best val RMSE=%.6f',
+               int(epoch_counter.numpy()), float(best_rmse.numpy()))
 
 
 class Summary:
-  """Summary statistics."""
+  """Summary statistics (unchanged from the provided TiDE implementation)."""
 
   def __init__(self, log_dir):
     self.metric_dict = {}

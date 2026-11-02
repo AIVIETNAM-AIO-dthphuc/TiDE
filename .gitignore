@@ -1,8 +1,13 @@
-v__pycache__/
+# Datasets
+datasets/*.csv
+
+# Python
+__pycache__/
 *.pyc
 .venv/
 venv/
-data/
+
+# Experiment outputs
 outputs/
 checkpoints/
 *.pt
