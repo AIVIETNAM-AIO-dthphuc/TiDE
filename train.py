@@ -211,10 +211,24 @@ def _configure_device():
 
 
 def _build_model_and_optimizer(model, optimizer, data):
-  """Create Keras variables/optimizer slots BEFORE restoring their values."""
+  """Create model variables and Adam slots before TF checkpoint restore.
+
+  TensorFlow/Keras 2.10 uses OptimizerV2 and does NOT expose build().
+  Its _create_all_weights(var_list) creates iterations, hypers and Adam's
+  momentum/variance slot variables without applying any gradient update.
+  Keras optimizers introduced in newer versions may expose build().
+  """
   sample = next(iter(data.tf_dataset(mode='train')))
   model((sample[:3], sample[4:6], sample[-1]), training=False)
-  optimizer.build(model.trainable_variables)
+  variables = model.trainable_variables
+  if not variables:
+    raise RuntimeError('Model has no trainable variables after initial forward pass.')
+  if hasattr(optimizer, '_create_all_weights'):
+    optimizer._create_all_weights(variables)  # TF 2.10 / Keras OptimizerV2
+  elif hasattr(optimizer, 'build'):
+    optimizer.build(variables)  # Newer Keras optimizers
+  else:
+    raise RuntimeError('Optimizer cannot initialize slots for checkpoint restore.')
 
 
 def _save_best_outputs(expt_dir, val_res, test_res, test_metrics):
