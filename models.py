@@ -61,6 +61,55 @@ class MLPResidual(keras.layers.Layer):
     return out + res
 
 
+class LowRankDense(keras.layers.Layer):
+  """Two-stage factorized linear projection: input_dim -> rank -> output_dim."""
+
+  def __init__(self, rank, output_dim, use_bias=True):
+    super(LowRankDense, self).__init__()
+    self.proj_down = tf.keras.layers.Dense(
+        rank,
+        activation=None,
+        use_bias=False,
+    )
+    self.proj_up = tf.keras.layers.Dense(
+        output_dim,
+        activation=None,
+        use_bias=use_bias,
+    )
+
+  def call(self, inputs):
+    return self.proj_up(self.proj_down(inputs))
+
+
+class LowRankMLPResidual(keras.layers.Layer):
+  """MLPResidual with low-rank factorization on output and skip projections."""
+
+  def __init__(
+      self, hidden_dim, output_dim, rank, layer_norm=False, dropout_rate=0.0
+  ):
+    super(LowRankMLPResidual, self).__init__()
+    self.lin_a = tf.keras.layers.Dense(
+        hidden_dim,
+        activation='relu',
+    )
+    self.lin_b = LowRankDense(rank, output_dim, use_bias=True)
+    self.lin_res = LowRankDense(rank, output_dim, use_bias=True)
+    if layer_norm:
+      self.lnorm = tf.keras.layers.LayerNormalization()
+    self.layer_norm = layer_norm
+    self.dropout = tf.keras.layers.Dropout(dropout_rate)
+
+  def call(self, inputs):
+    """Call method."""
+    h_state = self.lin_a(inputs)
+    out = self.lin_b(h_state)
+    out = self.dropout(out)
+    res = self.lin_res(inputs)
+    if self.layer_norm:
+      return self.lnorm(out + res)
+    return out + res
+
+
 def _make_dnn_residual(hidden_dims, layer_norm=False, dropout_rate=0.0):
   """Multi-layer DNN residual model."""
   if len(hidden_dims) < 2:
@@ -78,6 +127,41 @@ def _make_dnn_residual(hidden_dims, layer_norm=False, dropout_rate=0.0):
             dropout_rate=dropout_rate,
         )
     )
+  return keras.Sequential(layers)
+
+
+def _make_low_rank_decoder(
+    decoder_dims, decoder_rank=None, layer_norm=False, dropout_rate=0.0
+):
+  """Build Dense Decoder with optional Low-Rank final projection block."""
+  if decoder_rank is None or decoder_rank <= 0:
+    return _make_dnn_residual(
+        decoder_dims,
+        layer_norm=layer_norm,
+        dropout_rate=dropout_rate,
+    )
+  if len(decoder_dims) < 2:
+    return LowRankDense(decoder_rank, decoder_dims[-1], use_bias=True)
+
+  layers = []
+  for i, hdim in enumerate(decoder_dims[:-2]):
+    layers.append(
+        MLPResidual(
+            hdim,
+            decoder_dims[i + 1],
+            layer_norm=layer_norm,
+            dropout_rate=dropout_rate,
+        )
+    )
+  layers.append(
+      LowRankMLPResidual(
+          decoder_dims[-2],
+          decoder_dims[-1],
+          rank=decoder_rank,
+          layer_norm=layer_norm,
+          dropout_rate=dropout_rate,
+      )
+  )
   return keras.Sequential(layers)
 
 
@@ -130,11 +214,12 @@ class TideModel(keras.Model):
         layer_norm=layer_norm,
         dropout_rate=dropout_rate,
     )
-    self.decoder = _make_dnn_residual(
-        model_config.get('hidden_dims')[:-1]
-        + [
-            model_config.get('decoder_output_dim') * self.pred_len,
-        ],
+    decoder_dims = model_config.get('hidden_dims')[:-1] + [
+        model_config.get('decoder_output_dim') * self.pred_len,
+    ]
+    self.decoder = _make_low_rank_decoder(
+        decoder_dims,
+        decoder_rank=model_config.get('decoder_rank', None),
         layer_norm=layer_norm,
         dropout_rate=dropout_rate,
     )

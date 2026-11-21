@@ -1,3 +1,13 @@
+# M07 — Low-Rank Factorized Dense Decoder Projection for TiDE
+
+## Sơ lược ý tưởng cải tiến
+- **Vấn đề cần cải thiện:** Tầng chiếu cuối của khối `Dense Decoder` trong TiDE gốc dùng hai ma trận dày đặc (`lin_b` và `lin_res` tại `models.py#L40-L47`, `#L133-L137`) nối trực tiếp từ không gian ẩn `d_h` sang kích thước phẳng `H * p`. Khi dự báo tầm xa (`H = 720`) hoặc `p` lớn (VD: `ETTh2` chọn `p = 32`; `Electricity` chọn `d_h = 1024, p = 8`), số lượng tham số tầng cuối bùng nổ rất mạnh (~11.8M tham số trên `Electricity H = 720`), đúng như hạn chế tác giả thừa nhận ở Mục 6 Conclusion.
+- **Ý tưởng cải tiến:** Thay thế ma trận chiếu dày đặc `W` kích thước `(H * p, d_h)` tại khối cuối `Dense Decoder` (cho cả nhánh chính `lin_b` và đường tắt `lin_res`) bằng tích của hai ma trận hạng thấp đi qua một nút thắt `r << min(d_h, H * p)`: `Linear(d_h -> r, bias=False)` nối tiếp `Linear(r -> H * p, bias=True)`, với mốc mặc định `r = 64` (cấu hình qua cờ `--decoder_rank`).
+- **Cơ sở khoa học & Kỳ vọng:** Kế thừa Sainath et al. (ICASSP 2013 — *Low-rank matrix factorization for DNN training with high-dimensional output targets*) và LoRA (Hu et al., ICLR 2022) về hạng nội tại thấp. Giảm ~85.4% tham số khối chiếu cuối trên `ETTh1/ETTh2 H = 96` (`r = 64, d_h = 512, p = 32`), giảm ~92.6% trên `Electricity H = 720`, giảm FLOPs >13x, giữ nguyên tốc độ One-Shot `O(1)` và đóng vai trò điều chuẩn ngầm giúp cải thiện hoặc duy trì MSE/MAE.
+- **Cờ chạy dòng lệnh mới:** `--decoder_rank=64` (đặt `--decoder_rank=0` để quay về TiDE gốc).
+
+---
+
 # Long-term Forecasting with TiDE: Time-series Dense Encoder
 
 Authors: Abhimanyu Das, Weihao Kong, Andrew Leach, Shaan Mathur, Rajat Sen and Rose Yu
