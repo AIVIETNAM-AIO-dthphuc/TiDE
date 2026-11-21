@@ -1,3 +1,13 @@
+# M08 — Temporal-Smoothed Dense Decoder for TiDE
+
+## Sơ lược ý tưởng cải tiến
+- **Vấn đề cần cải thiện:** Do cơ chế giải mã One-Shot tách ma trận chiếu tầng cuối `Dense Decoder` thành các lát cắt độc lập cho từng bước thời gian `t = 1..H`, ngay sau thao tác `tf.reshape` (`models.py#L208-L210`) thành ma trận `D` kích thước `(B, p, H)`, giữa các cột bối cảnh liền kề `d_t` và `d_{t+1}` không có tương tác cục bộ trực tiếp, dễ gây dao động răng cưa (jitter) trên chuỗi nhạy pha.
+- **Ý tưởng cải tiến:** Chèn một lớp tích chập 1D theo chiều sâu siêu nhẹ (`DepthwiseConv1D` với `kernel_size = 3`, `padding = 'same'`, `depth_multiplier = 1`, khởi tạo trọng số `zeros`) kết hợp kết nối dư (`residual`) ngay sau phép `Reshape` của `Dense Decoder` (transpose qua lại chuẩn `channels_last` `(B, H, p)`) trước khi nối ghép ngoại sinh tương lai đưa sang `Temporal Decoder` (`models.py#L211`).
+- **Cơ sở khoa học & Kỳ vọng:** Kế thừa TCN (Bai et al., 2018) về lọc cục bộ trên chuỗi thời gian. Chi phí tham số gần như bằng 0 (chỉ thêm `(k + 1) * p = 4 * 32 = 128` tham số ở `ETTh1/ETTh2`), giữ nguyên tốc độ song song `O(1)` trên GPU và làm mượt chuỗi dự báo giữa các bước lân cận.
+- **Cờ chạy dòng lệnh mới:** `--smooth_kernel_size=3` (đặt `--smooth_kernel_size=0` để quay về TiDE gốc).
+
+---
+
 # Long-term Forecasting with TiDE: Time-series Dense Encoder
 
 Authors: Abhimanyu Das, Weihao Kong, Andrew Leach, Shaan Mathur, Rajat Sen and Rose Yu

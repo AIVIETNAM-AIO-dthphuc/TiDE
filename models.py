@@ -138,6 +138,19 @@ class TideModel(keras.Model):
         layer_norm=layer_norm,
         dropout_rate=dropout_rate,
     )
+    self.decoder_output_dim = model_config.get('decoder_output_dim')
+    self.smooth_kernel_size = model_config.get('smooth_kernel_size', 3)
+    if self.smooth_kernel_size and self.smooth_kernel_size > 0:
+      self.temporal_smoother = tf.keras.layers.DepthwiseConv1D(
+          kernel_size=self.smooth_kernel_size,
+          padding='same',
+          depth_multiplier=1,
+          use_bias=True,
+          depthwise_initializer='zeros',
+          bias_initializer='zeros',
+      )
+    else:
+      self.temporal_smoother = None
     self.linear = tf.keras.layers.Dense(
         self.pred_len,
         activation=None,
@@ -206,8 +219,12 @@ class TideModel(keras.Model):
     encoding = self.encoder(encoder_input)
     decoder_out = self.decoder(encoding)
     decoder_out = tf.reshape(
-        decoder_out, [bsize, -1, self.pred_len]
-    )  # batch x d x H
+        decoder_out, [bsize, self.decoder_output_dim, self.pred_len]
+    )  # batch x p x H
+    if self.temporal_smoother is not None:
+      d_trans = tf.transpose(decoder_out, (0, 2, 1))  # (B, H, p)
+      d_trans = d_trans + self.temporal_smoother(d_trans)
+      decoder_out = tf.transpose(d_trans, (0, 2, 1))  # (B, p, H)
     final_in = tf.concat([decoder_out, enc_fut], axis=1)
     out = self.final_decoder(tf.transpose(final_in, (0, 2, 1)))  # B x H x 1
     out = tf.squeeze(out, axis=-1)
