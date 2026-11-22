@@ -195,7 +195,7 @@ class TideModel(keras.Model):
     self.final_decoder = MLPResidual(
         hidden_dim=model_config.get('final_decoder_hidden'),
         output_dim=1,
-        layer_norm=layer_norm,
+        layer_norm=False,  # Fix LayerNorm cho output 1 chieu
         dropout_rate=dropout_rate,
     )
     self.cat_embs = []
