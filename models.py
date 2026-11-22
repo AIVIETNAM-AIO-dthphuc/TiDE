@@ -162,7 +162,8 @@ class TideModel(keras.Model):
     self.final_decoder = MLPResidual(
         hidden_dim=model_config.get('final_decoder_hidden'),
         output_dim=1,
-        layer_norm=layer_norm,
+        # LayerNorm over one feature would collapse the prediction to its bias.
+        layer_norm=False,
         dropout_rate=dropout_rate,
     )
     self.cat_embs = []
