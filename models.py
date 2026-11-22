@@ -154,10 +154,14 @@ class TideModel(keras.Model):
         layer_norm=False,
         dropout_rate=dropout_rate,
     )
-    self.fusion_gate = tf.keras.layers.Dense(
+    self.block_pool = keras.layers.AveragePooling1D(
+        pool_size=8, strides=8, padding='same',
+    )
+    self.block_correction = keras.layers.Dense(
         1,
-        activation='sigmoid',
-        name='temporal_fusion_gate',
+        kernel_initializer='zeros',
+        bias_initializer='zeros',
+        name='block_correction',
     )
     self.cat_embs = []
     for cat_size in cat_sizes:
@@ -220,10 +224,11 @@ class TideModel(keras.Model):
     temporal_out = self.final_decoder(temporal_in)
     temporal_out = tf.squeeze(temporal_out, axis=-1)
 
-    alpha = self.fusion_gate(temporal_in)
-    alpha = tf.squeeze(alpha, axis=-1)
-
-    out = residual_out + alpha * temporal_out
+    knots = self.block_correction(self.block_pool(temporal_in))  # [B, H/8, 1]
+    # Interpolate along time only. Each knot represents its block center.
+    smooth = tf.image.resize(knots[:, :, None, :], [self.pred_len, 1],
+                             method='bilinear')[:, :, 0, 0]
+    out = residual_out + temporal_out + smooth
     if self.transform:
       out = (out - affine_bias[:, None]) / (affine_weight[:, None] + EPS)
       out = out * batch_std[:, None] + batch_mean[:, None]

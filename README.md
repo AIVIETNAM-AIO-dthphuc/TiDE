@@ -61,43 +61,8 @@ python3 -m train \
 In the above command, `<new-dataset-name>` corresponds to the dictionary entry corresponding to your new dataset. The package does not include tools for hyper-parameter tuning which is left to the user.
 
 
-## M03 — Gate theo từng bước khi kết hợp Temporal Decoder và Global Residual
+## M03a — Hiệu chỉnh Temporal Decoder theo nhóm 8 giờ
 
-### Ý tưởng
+Với horizon 96, lấy trung bình 8 vector temporal_in liên tiếp để tạo 12 vector. Một lớp Dense(1) dùng chung cho 12 nhóm học mức hiệu chỉnh ở tâm từng nhóm. Nội suy tuyến tính cho 96 giờ, giữ giá trị biên ở hai đầu. Cộng phần hiệu chỉnh vào residual_out + temporal_out trước phép biến đổi ngược. Trọng số và bias của Dense mới khởi tạo bằng 0. Temporal Decoder một chiều dùng bản sửa LayerNorm của M03.
 
-TiDE gốc cộng đầu ra Temporal Decoder với đầu ra Global Residual bằng hệ số cố định:
-
-prediction = residual_out + temporal_out
-
-M03 thêm một gate để học mức đóng góp của Temporal Decoder cho từng chuỗi và từng bước trong horizon:
-
-alpha = sigmoid(G(temporal_in))
-prediction = residual_out + alpha * temporal_out
-
-Trong đó, temporal_in ghép vector do Dense Decoder tạo cho bước t với future covariates đã chiếu của đúng bước đó. Gate xuất một alpha trong khoảng (0, 1) cho mỗi bước dự báo.
-
-### Vị trí thay đổi
-
-Trong models.py, lớp TideModel:
-
-- __init__: thêm self.fusion_gate là Dense(1) với sigmoid.
-- call: dùng temporal_in làm đầu vào cho cả final_decoder và fusion_gate.
-- call: thay phép cộng cuối bằng residual_out + alpha * temporal_out.
-
-Nhánh Global Residual self.linear(past_ts) được giữ nguyên. Phần biến đổi ngược khi bật transform cũng được giữ sau phép kết hợp.
-
-### Giả thuyết
-
-Mức đóng góp hữu ích của Temporal Decoder có thể thay đổi theo từng thời điểm, nhất là khi future covariates báo sự kiện mạnh hoặc chứa nhiễu.
-
-### Kế hoạch kiểm chứng
-
-So M03 với TiDE gốc trên ETTh1-H96 và ETTh2-H96, trước mắt một seed theo quy trình chung của nhóm. Giữ cùng cấu hình, cách chia dữ liệu và ngân sách huấn luyện. Báo cáo kết quả dù phương pháp có cải thiện hay không.
-
-Trạng thái: đã cài đặt mã, chưa chạy thực nghiệm Kaggle.
-
-### Lưu ý về Temporal Decoder khi chạy ablation
-
-`final_decoder` trả về một giá trị cho mỗi bước dự báo. Nếu bật `LayerNormalization` trên trục đặc trưng có đúng một giá trị, đầu ra chỉ còn bias của lớp chuẩn hóa và mất tín hiệu từ `temporal_in`. Vì vậy M03 tắt LayerNorm riêng ở `final_decoder`; các residual block khác vẫn theo cờ `--layer_norm`.
-
-Không resume checkpoint đã tạo trước thay đổi này. Nếu đã có run cùng dataset/seed/horizon trên Drive, dùng `--run_id=layernorm_fix_v1` cho lần chạy mới. Baseline TiDE gốc cũng cần áp dụng cùng bản sửa trước khi so sánh MSE/MAE.
+Giả thuyết: các sai số cùng chiều kéo dài vài giờ có thể được học bằng một phần hiệu chỉnh chung. Chạy ETTh1-H96 với seed 1 và đối chiếu MSE/MAE với TiDE đã sửa LayerNorm và M03 cùng cấu hình. Dùng thư mục improvements/M03a để tách checkpoint.
