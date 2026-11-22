@@ -60,3 +60,42 @@ python3 -m train \
 
 In the above command, `<new-dataset-name>` corresponds to the dictionary entry corresponding to your new dataset. The package does not include tools for hyper-parameter tuning which is left to the user.
 
+## M04 — Adaptive Global Residual
+
+### Ý tưởng
+
+TiDE gốc dùng một lớp Linear ánh xạ lookback thành horizon để tạo nhánh Global Residual. M04 giữ lớp này và thêm một nhánh hiệu chỉnh tuyến tính. Một router đọc lookback để quyết định mức sử dụng phần hiệu chỉnh cho từng chuỗi.
+
+Công thức dạng văn bản:
+
+base_linear = self.linear(past_ts)
+correction = self.linear_correction(past_ts)
+route = sigmoid(self.linear_router(past_ts))
+residual_out = base_linear + route * correction
+prediction = temporal_out + residual_out
+
+Router xuất một hệ số cho mỗi chuỗi trong batch. Hệ số đó được dùng cho toàn bộ H bước của phần hiệu chỉnh.
+
+### Thay đổi trong mã
+
+Trong models.py, lớp TideModel:
+
+- Giữ nguyên self.linear của TiDE gốc.
+- Thêm self.linear_correction: Dense từ L giá trị cũ sang H giá trị tương lai, khởi tạo trọng số và bias bằng 0.
+- Thêm self.linear_router: Dense từ lookback sang một hệ số sigmoid.
+- Tạo residual_out bằng base_linear + route * correction.
+- Giữ nguyên Temporal Decoder và phép cộng cuối out += residual_out.
+
+### Cơ sở và giả thuyết
+
+MoLE (Ni và cộng sự, AISTATS 2024) nghiên cứu việc dùng router để phối hợp các mô hình dự báo tuyến tính theo mẫu thời gian.
+
+Giả thuyết của M04 là các chuỗi với lookback khác nhau có thể cần mức hiệu chỉnh tuyến tính khác nhau.
+
+Nguồn: https://proceedings.mlr.press/v238/ni24a.html
+
+### Kế hoạch thực nghiệm
+
+So với TiDE gốc trên ETTh1-H96 và ETTh2-H96, trước mắt một seed theo quy trình của nhóm. Giữ cùng dữ liệu, cách chia tập, horizon, siêu tham số và ngân sách huấn luyện. Báo cáo kết quả dù M04 cải thiện hay không.
+
+Trạng thái: đã cài đặt mã, chưa chạy thực nghiệm Kaggle.

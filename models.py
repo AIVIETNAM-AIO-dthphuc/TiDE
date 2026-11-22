@@ -142,6 +142,18 @@ class TideModel(keras.Model):
         self.pred_len,
         activation=None,
     )
+    self.linear_correction = tf.keras.layers.Dense(
+        self.pred_len,
+        activation=None,
+        kernel_initializer='zeros',
+        bias_initializer='zeros',
+        name='linear_correction',
+    )
+    self.linear_router = tf.keras.layers.Dense(
+        1,
+        activation='sigmoid',
+        name='linear_router',
+    )
     self.time_encoder = _make_dnn_residual(
         model_config.get('time_encoder_dims'),
         layer_norm=layer_norm,
@@ -200,7 +212,10 @@ class TideModel(keras.Model):
         tf.expand_dims(encoded_future_feats, axis=0), bsize, 0
     )  # batch x fdim x H
     enc_future = tf.reshape(enc_fut, [bsize, -1])
-    residual_out = self.linear(past_ts)
+    base_linear = self.linear(past_ts)
+    correction = self.linear_correction(past_ts)
+    route = self.linear_router(past_ts)
+    residual_out = base_linear + route * correction
     ts_embs = self.ts_embs(tsidx)
     encoder_input = tf.concat([past_ts, enc_past, enc_future, ts_embs], axis=1)
     encoding = self.encoder(encoder_input)
