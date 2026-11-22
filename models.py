@@ -153,6 +153,11 @@ class TideModel(keras.Model):
         layer_norm=layer_norm,
         dropout_rate=dropout_rate,
     )
+    self.fusion_gate = tf.keras.layers.Dense(
+        1,
+        activation='sigmoid',
+        name='temporal_fusion_gate',
+    )
     self.cat_embs = []
     for cat_size in cat_sizes:
       self.cat_embs.append(
@@ -209,9 +214,15 @@ class TideModel(keras.Model):
         decoder_out, [bsize, -1, self.pred_len]
     )  # batch x d x H
     final_in = tf.concat([decoder_out, enc_fut], axis=1)
-    out = self.final_decoder(tf.transpose(final_in, (0, 2, 1)))  # B x H x 1
-    out = tf.squeeze(out, axis=-1)
-    out += residual_out
+    temporal_in = tf.transpose(final_in, (0, 2, 1))
+
+    temporal_out = self.final_decoder(temporal_in)
+    temporal_out = tf.squeeze(temporal_out, axis=-1)
+
+    alpha = self.fusion_gate(temporal_in)
+    alpha = tf.squeeze(alpha, axis=-1)
+
+    out = residual_out + alpha * temporal_out
     if self.transform:
       out = (out - affine_bias[:, None]) / (affine_weight[:, None] + EPS)
       out = out * batch_std[:, None] + batch_mean[:, None]
