@@ -272,6 +272,89 @@ class TestTideModelSan(unittest.TestCase):
         actual_loss.numpy(), expected_total_loss.numpy(), rtol=1e-4
     )
 
+  def test_train_step_weight_update_includes_auxiliary_loss(self):
+    """Verifies that train_step updates weights with grad(MSE + lambda * stat_loss)
+    and NOT MSE alone for the SAN statistics-network variables."""
+    hist_len, pred_len, slice_len = 48, 24, 24
+    batch_size = 4
+    san_lambda = 0.5
+    lr = 0.05
+    past_data, future_features, tsidx, ytrue = self._make_dummy_inputs(
+        batch_size, hist_len, pred_len
+    )
+
+    model = models.TideModel(
+        model_config=self.model_config,
+        pred_len=pred_len,
+        cat_sizes=self.cat_sizes,
+        num_ts=self.num_ts,
+        san=True,
+        san_slice_len=slice_len,
+        san_lambda=san_lambda,
+    )
+    # Build model with training=False first
+    model((past_data, future_features, tsidx), training=False)
+
+    # 1. Compute independent gradients on the pre-update weights
+    with tf.GradientTape(persistent=True) as tape:
+      preds = model((past_data, future_features, tsidx), training=True)
+      pred_mse = tf.reduce_mean(tf.square(ytrue - preds))
+      mean_x = tf.reduce_mean(past_data[0], axis=1, keepdims=True)
+      _, mu_p, sd_p = models.slice_normalize(past_data[0], slice_len)
+      mu_hat, sd_hat = model.san_stats_network(mu_p, sd_p, mean_x)
+      mu_f, sd_f = models.extract_slice_stats(ytrue, slice_len)
+      stat_loss = tf.reduce_mean(tf.square(mu_f - mu_hat)) + tf.reduce_mean(
+          tf.square(sd_f - sd_hat)
+      )
+      total_loss = pred_mse + san_lambda * stat_loss
+
+    total_grads = tape.gradient(total_loss, model.trainable_variables)
+    mse_only_grads = tape.gradient(pred_mse, model.trainable_variables)
+    del tape
+
+    vars_before = [v.numpy().copy() for v in model.trainable_variables]
+
+    # 2. Call train_step once with plain SGD and known lr
+    optimizer = keras.optimizers.SGD(learning_rate=lr)
+    _ = model.train_step(past_data, future_features, ytrue, tsidx, optimizer)
+
+    vars_after = [v.numpy().copy() for v in model.trainable_variables]
+
+    # 3. Check actual change equals -lr * grad(total_loss)
+    san_var_names = {v.name for v in model.san_stats_network.trainable_variables}
+    backbone_var_names = {v.name for v in model.linear.trainable_variables}
+
+    checked_san = 0
+    checked_backbone = 0
+
+    for v, vb, va, tg, mg in zip(
+        model.trainable_variables, vars_before, vars_after, total_grads, mse_only_grads
+    ):
+      actual_change = va - vb
+      expected_total_change = -lr * tf.convert_to_tensor(tg).numpy()
+      expected_mse_change = -lr * tf.convert_to_tensor(mg).numpy()
+
+      # For SAN statistics-network variables and backbone variables:
+      if v.name in san_var_names or v.name in backbone_var_names:
+        np.testing.assert_allclose(
+            actual_change, expected_total_change, rtol=1e-4, atol=1e-4,
+            err_msg=f'Weight update for {v.name} did not match total loss gradient update.'
+        )
+
+      if v.name in san_var_names and ('mu_out' in v.name or 'sd_out' in v.name):
+        checked_san += 1
+        diff_from_mse = np.max(np.abs(actual_change - expected_mse_change))
+        self.assertGreater(
+            diff_from_mse, 1e-4,
+            f'Expected update for {v.name} to include auxiliary loss, but it matched MSE-only gradient.'
+        )
+
+      if v.name in backbone_var_names:
+        checked_backbone += 1
+
+    self.assertGreater(checked_san, 0)
+    self.assertGreater(checked_backbone, 0)
+
   def test_dropout_behavior_and_loss_consistency(self):
     """Build with training=False, lr=0: 3 train_step calls return identical losses for san=False and san=True;
     and for san=True returned loss equals MSE(y, model(x)) + lambda * stat_loss computed independently."""
