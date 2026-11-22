@@ -72,6 +72,26 @@ class FrequencyEnhancedLossTest(unittest.TestCase):
           f'Failed for horizon {horizon}: rel_diff={rel_diff}',
       )
 
+  def test_large_offset_numerical_stability(self):
+    """Residual FFT avoids catastrophic cancellation on large offsets (H=720, alpha=1.0)."""
+    horizon = 720
+    y_pred_np = np.full((1, horizon), 10000.01, dtype=np.float64)
+    y_true_np = np.full((1, horizon), 10000.0, dtype=np.float64)
+    expected_np = np.mean(
+        np.abs(np.fft.rfft(y_pred_np - y_true_np, axis=-1))
+    )
+
+    y_pred_tf = tf.constant(y_pred_np)
+    y_true_tf = tf.constant(y_true_np)
+    loss_tf = models.freq_enhanced_loss(y_true_tf, y_pred_tf, alpha=1.0).numpy()
+
+    rel_diff = abs(loss_tf - expected_np) / expected_np
+    self.assertLessEqual(
+        rel_diff,
+        1e-3,
+        f'Failed numerical stability check: rel_diff={rel_diff}',
+    )
+
   def test_alpha_half_weighted_combination(self):
     """alpha=0.5 equals 0.5 * MSE + 0.5 * freq_loss across horizons."""
     for horizon in (96, 336, 720):

@@ -62,7 +62,7 @@ In the above command, `<new-dataset-name>` corresponds to the dictionary entry c
 
 ## Frequency-Enhanced Loss (FreDF-style)
 The training loss can combine time-domain MSE with a frequency-domain L1 penalty on rFFT:
-`L = (1 - alpha) * MSE(y_pred, y_true) + alpha * mean(|rFFT(y_pred) - rFFT(y_true)|)`
+`L = (1 - alpha) * MSE(y_pred, y_true) + alpha * mean(|rFFT(y_pred - y_true)|)`
 Use `--freq_loss_alpha` (default `0.0`, range `[0, 1]`) to control the frequency loss weight:
 ```bash
 python3 -m train --dataset=electricity --pred_len=720 --random_seed=1 --freq_loss_alpha=0.5

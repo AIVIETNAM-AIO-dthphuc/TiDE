@@ -26,10 +26,21 @@ EPS = 1e-7
 train_loss = keras.losses.MeanSquaredError()
 
 
+def _compute_residual(y_true, y_pred):
+  """Computes float32 residual (y_pred - y_true) avoiding premature precision loss."""
+  if hasattr(y_pred, 'dtype') and hasattr(y_true, 'dtype') and y_pred.dtype != y_true.dtype:
+    if y_pred.dtype == tf.float64 or y_true.dtype == tf.float64:
+      return tf.cast(
+          tf.cast(y_pred, tf.float64) - tf.cast(y_true, tf.float64), tf.float32
+      )
+    return tf.cast(y_pred, tf.float32) - tf.cast(y_true, tf.float32)
+  return tf.cast(y_pred - y_true, tf.float32)
+
+
 def freq_enhanced_loss(y_true, y_pred, alpha=0.0):
   """Frequency-enhanced loss combining time-domain MSE and frequency-domain L1.
 
-  L = (1 - alpha) * MSE(y_pred, y_true) + alpha * mean(|rFFT(y_pred) - rFFT(y_true)|)
+  L = (1 - alpha) * MSE(y_pred, y_true) + alpha * mean(|rFFT(y_pred - y_true)|)
   where rFFT is computed along the last axis (prediction horizon).
 
   Args:
@@ -44,22 +55,16 @@ def freq_enhanced_loss(y_true, y_pred, alpha=0.0):
   if isinstance(alpha, (int, float)):
     if alpha == 0.0:
       return train_loss(y_true, y_pred)
-    y_true_f = tf.cast(y_true, tf.float32)
-    y_pred_f = tf.cast(y_pred, tf.float32)
-    freq_loss = tf.reduce_mean(
-        tf.abs(tf.signal.rfft(y_pred_f) - tf.signal.rfft(y_true_f))
-    )
+    residual = _compute_residual(y_true, y_pred)
+    freq_loss = tf.reduce_mean(tf.abs(tf.signal.rfft(residual)))
     if alpha == 1.0:
       return freq_loss
     mse_loss = tf.cast(train_loss(y_true, y_pred), tf.float32)
     return tf.cast(1.0 - alpha, tf.float32) * mse_loss + tf.cast(alpha, tf.float32) * freq_loss
 
   alpha_f = tf.cast(alpha, tf.float32)
-  y_true_f = tf.cast(y_true, tf.float32)
-  y_pred_f = tf.cast(y_pred, tf.float32)
-  freq_loss = tf.reduce_mean(
-      tf.abs(tf.signal.rfft(y_pred_f) - tf.signal.rfft(y_true_f))
-  )
+  residual = _compute_residual(y_true, y_pred)
+  freq_loss = tf.reduce_mean(tf.abs(tf.signal.rfft(residual)))
   mse_loss = tf.cast(train_loss(y_true, y_pred), tf.float32)
   return (1.0 - alpha_f) * mse_loss + alpha_f * freq_loss
 
