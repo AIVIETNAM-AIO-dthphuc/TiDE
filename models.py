@@ -26,6 +26,40 @@ EPS = 1e-7
 train_loss = keras.losses.MeanSquaredError()
 
 
+class LightweightVSNGate(keras.layers.Layer):
+  """Lightweight VSN Gate (M10): bottleneck feature gating before time_encoder.
+
+  Computes g_t = 2 * sigmoid(ReLU(u_t W_g1 + b_g1) W_g2 + b_g2) and returns
+  u_t * g_t. Initialized with W_g2 = 0, b_g2 = 0 so g_t = 1 at epoch 0,
+  preserving the baseline TiDE behavior at initialization.
+  """
+
+  def __init__(self, gate_hidden_dim=8, **kwargs):
+    super(LightweightVSNGate, self).__init__(**kwargs)
+    self.gate_hidden_dim = gate_hidden_dim
+    self.gate_fc1 = tf.keras.layers.Dense(
+        self.gate_hidden_dim,
+        activation='relu',
+        name='vsn_gate_fc1',
+    )
+
+  def build(self, input_shape):
+    feat_dim = int(input_shape[-1])
+    self.gate_fc2 = tf.keras.layers.Dense(
+        feat_dim,
+        activation=None,
+        kernel_initializer='zeros',
+        bias_initializer='zeros',
+        name='vsn_gate_fc2',
+    )
+    super(LightweightVSNGate, self).build(input_shape)
+
+  def call(self, inputs):
+    """Apply element-wise dynamic feature gate on [T, r] covariates."""
+    gate = 2.0 * tf.math.sigmoid(self.gate_fc2(self.gate_fc1(inputs)))
+    return inputs * gate
+
+
 class MLPResidual(keras.layers.Layer):
   """Simple one hidden state residual network."""
 
@@ -142,6 +176,11 @@ class TideModel(keras.Model):
         self.pred_len,
         activation=None,
     )
+    self.use_vsn_gate = model_config.get('use_vsn_gate', True)
+    if self.use_vsn_gate:
+      self.vsn_gate = LightweightVSNGate(
+          gate_hidden_dim=model_config.get('gate_hidden_dim', 8)
+      )
     self.time_encoder = _make_dnn_residual(
         model_config.get('time_encoder_dims'),
         layer_norm=layer_norm,
@@ -188,12 +227,13 @@ class TideModel(keras.Model):
       )
       past_ts = (past_ts - batch_mean[:, None]) / batch_std[:, None]
       past_ts = affine_weight[:, None] * past_ts + affine_bias[:, None]
-    encoded_past_feats = tf.transpose(
-        self.time_encoder(tf.transpose(past_feats))
-    )
-    encoded_future_feats = tf.transpose(
-        self.time_encoder(tf.transpose(future_feats))
-    )
+    past_feats_t = tf.transpose(past_feats)
+    future_feats_t = tf.transpose(future_feats)
+    if self.use_vsn_gate:
+      past_feats_t = self.vsn_gate(past_feats_t)
+      future_feats_t = self.vsn_gate(future_feats_t)
+    encoded_past_feats = tf.transpose(self.time_encoder(past_feats_t))
+    encoded_future_feats = tf.transpose(self.time_encoder(future_feats_t))
     enc_past = tf.repeat(tf.expand_dims(encoded_past_feats, axis=0), bsize, 0)
     enc_past = tf.reshape(enc_past, [bsize, -1])
     enc_fut = tf.repeat(

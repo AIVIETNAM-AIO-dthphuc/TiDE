@@ -76,6 +76,11 @@ flags.DEFINE_integer('num_split', 1, 'Number of splits during inference')
 flags.DEFINE_integer('min_num_epochs', 0, 'Minimum epochs before early stopping')
 flags.DEFINE_integer('gpu', 0, 'GPU index; CPU is used if no GPU is available')
 
+# M10 improvement flags: Lightweight VSN Gate & configurable temporal_width.
+flags.DEFINE_bool('use_vsn_gate', True, 'Enable Lightweight VSN Gate before time_encoder (M10)')
+flags.DEFINE_integer('gate_hidden_dim', 8, 'Bottleneck hidden dimension r_g for Lightweight VSN Gate (M10)')
+flags.DEFINE_integer('temporal_width', 4, 'Output dimension r_tilde of time_encoder (Feature Projection)')
+
 # Convenience arguments for notebook launches (aliases of original flags).
 flags.DEFINE_integer('seed', None, 'Alias for --random_seed')
 flags.DEFINE_integer('horizon', None, 'Alias for --pred_len')
@@ -155,6 +160,8 @@ def _resolve_arguments():
     raise ValueError('--backup_every and --max_to_keep must be positive integers.')
   if FLAGS.train_epochs < 0:
     raise ValueError('--train_epochs cannot be negative.')
+  if FLAGS.gate_hidden_dim < 1 or FLAGS.temporal_width < 1:
+    raise ValueError('--gate_hidden_dim and --temporal_width must be positive integers.')
   if FLAGS.run_id is not None and not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', FLAGS.run_id):
     raise ValueError('--run_id must contain 1-64 letters, digits, underscores or hyphens.')
   return 'electricity' if FLAGS.dataset == 'elec' else FLAGS.dataset
@@ -169,6 +176,7 @@ def _run_config():
       'cat_cov_cols', 'epoch_len', 'normalize', 'holiday', 'permute',
       'transform', 'layer_norm', 'dropout_rate', 'num_split',
       'min_num_epochs', 'patience', 'train_epochs',
+      'use_vsn_gate', 'gate_hidden_dim', 'temporal_width',
   )
   config = {key: getattr(FLAGS, key) for key in keys}
   config['run_id'] = FLAGS.run_id
@@ -340,10 +348,12 @@ def training():
   model_config = {
       'model_type': 'dnn',
       'hidden_dims': [FLAGS.hidden_size] * FLAGS.num_layers,
-      'time_encoder_dims': [64, 4],
+      'time_encoder_dims': [64, FLAGS.temporal_width],
       'decoder_output_dim': FLAGS.decoder_output_dim,
       'final_decoder_hidden': FLAGS.final_decoder_hidden,
       'batch_size': dtl.batch_size,
+      'use_vsn_gate': FLAGS.use_vsn_gate,
+      'gate_hidden_dim': FLAGS.gate_hidden_dim,
   }
   model = models.TideModel(
       model_config=model_config,

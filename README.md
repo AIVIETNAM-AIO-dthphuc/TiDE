@@ -1,3 +1,20 @@
+# FEAT/M10: Cổng lọc biến nhẹ (Lightweight VSN Gate) cho TiDE (`feat/m10`)
+
+## Sơ lược ý tưởng cải tiến
+- **Thành phần tác động:** Feature Projection (`self.time_encoder` trong `models.py`) và cấu hình siêu tham số trong `train.py`.
+- **Vấn đề trong TiDE gốc:**
+  1. Khối `self.time_encoder` dùng trọng số tĩnh nén đồng đều mọi biến covariates về $\tilde{r}=4$ cố định (bài báo gốc chưa đánh giá ảnh hưởng của $\tilde{r}$), không có cơ chế lọc biến dư thừa hoặc nhiễu ngoại lai.
+  2. Trên các bộ dữ liệu thực nghiệm của nhóm, nhiều cột covariates mang tính hằng số hoặc lệch địa lý (như `moh = -0.5` trên các tập tần suất `1H`, cột đệm `ncol = 0`, và 18 cột ngày lễ Mỹ bật trên 4 bộ ETT đo tại Trung Quốc).
+- **Giải pháp (M10):**
+  1. Bổ sung lớp `LightweightVSNGate` dạng bottleneck ($r \to r_g \to r$, mặc định $r_g = 8$) ngay trước `self.time_encoder`:
+     $$\mathbf{g}_t = 2\sigma\big(\text{ReLU}(\mathbf{u}_t\mathbf{W}_{g1} + \mathbf{b}_{g1})\mathbf{W}_{g2} + \mathbf{b}_{g2}\big), \qquad \hat{\mathbf{u}}_t = \mathbf{g}_t \odot \mathbf{u}_t$$
+     khởi tạo $\mathbf{W}_{g2} = \mathbf{0}, \mathbf{b}_{g2} = \mathbf{0} \implies \mathbf{g}_t = \mathbf{1}$ tại epoch 0 nhằm bảo toàn nguyên vẹn hành vi TiDE gốc lúc bắt đầu huấn luyện.
+  2. Mở cờ `--temporal_width` (mặc định `4`) cho phép thực nghiệm kiểm chứng các giá trị $\tilde{r} \in \{2, 4, 8\}$ trực tiếp từ dòng lệnh/notebook.
+- **Chi phí tham số & tốc độ:** Rất thấp (`< 0.01%` toàn mô hình), tính 1 lần trước `tf.repeat` nên giữ nguyên độ phức tạp $O(L)$.
+- **Các file chỉnh sửa:** `models.py`, `train.py`, `README.md`.
+- **Tài liệu tham khảo:** Lim et al. (2021) *Temporal Fusion Transformers (VSN/GRN)* (`arXiv:1912.09363`); Hu et al. (2018) *SE-Net* (`arXiv:1709.01507`); Das et al. (2023) *TiDE*.
+
+
 # Long-term Forecasting with TiDE: Time-series Dense Encoder
 
 Authors: Abhimanyu Das, Weihao Kong, Andrew Leach, Shaan Mathur, Rajat Sen and Rose Yu
