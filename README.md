@@ -95,3 +95,9 @@ Mức đóng góp hữu ích của Temporal Decoder có thể thay đổi theo t
 So M03 với TiDE gốc trên ETTh1-H96 và ETTh2-H96, trước mắt một seed theo quy trình chung của nhóm. Giữ cùng cấu hình, cách chia dữ liệu và ngân sách huấn luyện. Báo cáo kết quả dù phương pháp có cải thiện hay không.
 
 Trạng thái: đã cài đặt mã, chưa chạy thực nghiệm Kaggle.
+
+### Lưu ý về Temporal Decoder khi chạy ablation
+
+`final_decoder` trả về một giá trị cho mỗi bước dự báo. Nếu bật `LayerNormalization` trên trục đặc trưng có đúng một giá trị, đầu ra chỉ còn bias của lớp chuẩn hóa và mất tín hiệu từ `temporal_in`. Vì vậy M03 tắt LayerNorm riêng ở `final_decoder`; các residual block khác vẫn theo cờ `--layer_norm`.
+
+Không resume checkpoint đã tạo trước thay đổi này. Nếu đã có run cùng dataset/seed/horizon trên Drive, dùng `--run_id=layernorm_fix_v1` cho lần chạy mới. Baseline TiDE gốc cũng cần áp dụng cùng bản sửa trước khi so sánh MSE/MAE.
