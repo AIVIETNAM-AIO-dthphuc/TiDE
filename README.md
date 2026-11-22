@@ -5,6 +5,7 @@
 - **Ý tưởng cải tiến:** Thay thế ma trận chiếu dày đặc `W` kích thước `(H * p, d_h)` tại khối cuối `Dense Decoder` (cho cả nhánh chính `lin_b` và đường tắt `lin_res`) bằng tích của hai ma trận hạng thấp đi qua một nút thắt `r << min(d_h, H * p)`: `Linear(d_h -> r, bias=False)` nối tiếp `Linear(r -> H * p, bias=True)`, với mốc mặc định `r = 64` (cấu hình qua cờ `--decoder_rank`).
 - **Cơ sở khoa học & Kỳ vọng:** Kế thừa Sainath et al. (ICASSP 2013 — *Low-rank matrix factorization for DNN training with high-dimensional output targets*) và LoRA (Hu et al., ICLR 2022) về hạng nội tại thấp. Giảm ~85.4% tham số khối chiếu cuối trên `ETTh1/ETTh2 H = 96` (`r = 64, d_h = 512, p = 32`), giảm ~92.6% trên `Electricity H = 720`, giảm FLOPs >13x, giữ nguyên tốc độ One-Shot `O(1)` và đóng vai trò điều chuẩn ngầm giúp cải thiện hoặc duy trì MSE/MAE.
 - **Cờ chạy dòng lệnh mới:** `--decoder_rank=64` (đặt `--decoder_rank=0` để quay về TiDE gốc).
+- **Sửa lỗi `LayerNorm` trên `final_decoder` (`output_dim=1`):** Đặt `layer_norm=False` riêng cho `self.final_decoder` để khắc phục lỗi `LayerNormalization(axis=-1)` trên tensor shape `(B, H, 1)` của TiDE gốc vốn triệt tiêu toàn bộ nhánh Encoder–Decoder về hằng số khi `--layer_norm=true`.
 
 ---
 
