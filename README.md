@@ -59,4 +59,28 @@ python3 -m train \
 ```
 
 In the above command, `<new-dataset-name>` corresponds to the dictionary entry corresponding to your new dataset. The package does not include tools for hyper-parameter tuning which is left to the user.
+## M06 - Low-Rank Gated Residual (LRGR)
 
+LRGR is a proposed improvement to the TiDE Residual Block.
+
+The original residual addition:
+Y = F(X) + S(X)
+
+is replaced by:
+Y = g(h) * F(X) + S(X)
+
+where:
+g(h) = 2 * sigmoid(W_up * ReLU(W_down * h + b_down) + b_up)
+
+The gate uses a low-rank bottleneck:
+hidden_dim -> gate_rank -> output_dim
+
+Default gate_rank = 16.
+
+The final gate layer is zero-initialized, giving g(h) = 1
+at initialization.
+
+Initial evaluation:
+- ETTh1, H = 96
+- ETTh2, H = 96
+- One seed per dataset

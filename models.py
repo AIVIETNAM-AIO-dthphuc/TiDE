@@ -24,62 +24,88 @@ from tqdm import tqdm
 EPS = 1e-7
 
 train_loss = keras.losses.MeanSquaredError()
-
-
 class MLPResidual(keras.layers.Layer):
-  """Simple one hidden state residual network."""
-
+  """Residual block with optional Low-Rank Gated Residual (LRGR)."""
   def __init__(
-      self, hidden_dim, output_dim, layer_norm=False, dropout_rate=0.0
+      self,
+      hidden_dim,
+      output_dim,
+      layer_norm=False,
+      dropout_rate=0.0,
+      gate_rank=16,
+      use_lrgr=True,
   ):
     super(MLPResidual, self).__init__()
+
+    # Nhanh MLP goc cua TiDE
     self.lin_a = tf.keras.layers.Dense(
-        hidden_dim,
-        activation='relu',
+        hidden_dim, activation='relu'
     )
     self.lin_b = tf.keras.layers.Dense(
-        output_dim,
-        activation=None,
+        output_dim, activation=None
     )
+
+    # Nhanh Linear Skip goc cua TiDE
     self.lin_res = tf.keras.layers.Dense(
-        output_dim,
-        activation=None,
+        output_dim, activation=None
     )
+
+    # Dropout va LayerNorm goc
     if layer_norm:
       self.lnorm = tf.keras.layers.LayerNormalization()
+
     self.layer_norm = layer_norm
     self.dropout = tf.keras.layers.Dropout(dropout_rate)
 
-  def call(self, inputs):
-    """Call method."""
+    # Cau hinh LRGR
+    self.use_lrgr = use_lrgr
+    self.gate_rank = gate_rank
+
+    if self.use_lrgr:
+      # Buoc 1: Giam chieu d_h -> r
+      self.gate_down = tf.keras.layers.Dense(
+          gate_rank,
+          activation='relu',
+          name='lrgr_down',
+      )
+
+      # Buoc 2: Tang chieu r -> d_out
+      # Khoi tao bang 0 de Gate ban dau bang 1
+      self.gate_up = tf.keras.layers.Dense(
+          output_dim,
+          activation=None,
+          kernel_initializer='zeros',
+          bias_initializer='zeros',
+          name='lrgr_up',
+      )
+
+  def call(self, inputs, training=None):
+    """Forward pass of LRGR block."""
+
+    # Nhanh MLP
     h_state = self.lin_a(inputs)
     out = self.lin_b(h_state)
-    out = self.dropout(out)
+    out = self.dropout(out, training=training)
+
+    # Nhanh Skip
     res = self.lin_res(inputs)
+
+    # Mang Gate Bottleneck
+    if self.use_lrgr:
+      gate_hidden = self.gate_down(h_state)
+      gate_logits = self.gate_up(gate_hidden)
+
+      # g(h) = 2 * sigmoid(...)
+      gate = 2.0 * tf.math.sigmoid(gate_logits)
+
+      # Dieu chinh nhanh MLP
+      out = gate * out
+
+    # Cong Residual va LayerNorm tuy chon
     if self.layer_norm:
       return self.lnorm(out + res)
+
     return out + res
-
-
-def _make_dnn_residual(hidden_dims, layer_norm=False, dropout_rate=0.0):
-  """Multi-layer DNN residual model."""
-  if len(hidden_dims) < 2:
-    return keras.layers.Dense(
-        hidden_dims[-1],
-        activation=None,
-    )
-  layers = []
-  for i, hdim in enumerate(hidden_dims[:-1]):
-    layers.append(
-        MLPResidual(
-            hdim,
-            hidden_dims[i + 1],
-            layer_norm=layer_norm,
-            dropout_rate=dropout_rate,
-        )
-    )
-  return keras.Sequential(layers)
-
 
 class TideModel(keras.Model):
   """Main class for multi-scale DNN model."""
