@@ -92,6 +92,25 @@ class MLPResidual(keras.layers.Layer):
     if self.layer_norm:
       return self.lnorm(out + res)
     return out + res
+def _make_dnn_residual(hidden_dims, layer_norm=False, dropout_rate=0.0):
+  """Multi-layer DNN residual model."""
+  if len(hidden_dims) < 2:
+    return keras.layers.Dense(
+        hidden_dims[-1],
+        activation=None,
+    )
+  layers = []
+  for i, hdim in enumerate(hidden_dims[:-1]):
+    layers.append(
+        MLPResidual(
+            hdim,
+            hidden_dims[i + 1],
+            layer_norm=layer_norm,
+            dropout_rate=dropout_rate,
+        )
+    )
+  return keras.Sequential(layers)
+
 
 class TideModel(keras.Model):
   """Main class for multi-scale DNN model."""
