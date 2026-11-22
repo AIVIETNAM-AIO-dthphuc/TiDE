@@ -25,61 +25,73 @@ EPS = 1e-7
 
 train_loss = keras.losses.MeanSquaredError()
 
-
 class MLPResidual(keras.layers.Layer):
-  """Simple one hidden state residual network."""
+  """Residual block with Gated Residual (M05)."""
 
   def __init__(
-      self, hidden_dim, output_dim, layer_norm=False, dropout_rate=0.0
+      self,
+      hidden_dim,
+      output_dim,
+      layer_norm=False,
+      dropout_rate=0.0,
   ):
     super(MLPResidual, self).__init__()
+
+    # Nhanh MLP goc cua TiDE
     self.lin_a = tf.keras.layers.Dense(
         hidden_dim,
         activation='relu',
     )
+
     self.lin_b = tf.keras.layers.Dense(
         output_dim,
         activation=None,
     )
+
+    # Nhanh Linear Skip goc cua TiDE
     self.lin_res = tf.keras.layers.Dense(
         output_dim,
         activation=None,
     )
+
+    # M05: Mot lop Dense tao Gate day du
+    self.gate_dense = tf.keras.layers.Dense(
+        output_dim,
+        activation=None,
+        kernel_initializer='zeros',
+        bias_initializer='zeros',
+        name='gated_residual',
+    )
+
+    # LayerNorm tuy chon
     if layer_norm:
       self.lnorm = tf.keras.layers.LayerNormalization()
+
     self.layer_norm = layer_norm
     self.dropout = tf.keras.layers.Dropout(dropout_rate)
 
-  def call(self, inputs):
-    """Call method."""
+  def call(self, inputs, training=None):
+    """Forward pass of Gated Residual block."""
+
+    # Nhanh MLP
     h_state = self.lin_a(inputs)
     out = self.lin_b(h_state)
-    out = self.dropout(out)
+    out = self.dropout(out, training=training)
+
+    # Nhanh Linear Skip
     res = self.lin_res(inputs)
+
+    # M05: Tinh he so Gate tu h_state
+    gate_logits = self.gate_dense(h_state)
+    gate = 2.0 * tf.math.sigmoid(gate_logits)
+
+    # Dieu chinh dong gop cua nhanh MLP
+    out = gate * out
+
+    # Cong Residual va LayerNorm tuy chon
     if self.layer_norm:
       return self.lnorm(out + res)
     return out + res
-
-
-def _make_dnn_residual(hidden_dims, layer_norm=False, dropout_rate=0.0):
-  """Multi-layer DNN residual model."""
-  if len(hidden_dims) < 2:
-    return keras.layers.Dense(
-        hidden_dims[-1],
-        activation=None,
-    )
-  layers = []
-  for i, hdim in enumerate(hidden_dims[:-1]):
-    layers.append(
-        MLPResidual(
-            hdim,
-            hidden_dims[i + 1],
-            layer_norm=layer_norm,
-            dropout_rate=dropout_rate,
-        )
-    )
-  return keras.Sequential(layers)
-
 
 class TideModel(keras.Model):
   """Main class for multi-scale DNN model."""
