@@ -26,6 +26,121 @@ EPS = 1e-7
 train_loss = keras.losses.MeanSquaredError()
 
 
+def slice_normalize(x, slice_len, eps=EPS):
+  """Normalizes each slice of length slice_len with its own mean and std.
+
+  Args:
+    x: Input tensor of shape [batch, seq_len].
+    slice_len: Length of each temporal slice T.
+    eps: Small float epsilon to avoid division by zero.
+
+  Returns:
+    x_norm: Normalized tensor of shape [batch, seq_len].
+    mu: Slice means of shape [batch, num_slices].
+    sd: Slice stds of shape [batch, num_slices].
+  """
+  bsize = tf.shape(x)[0]
+  seq_len = x.shape[1]
+  num_slices = seq_len // slice_len if seq_len is not None else -1
+  x_slices = tf.reshape(x, [bsize, num_slices, slice_len])
+  mu = tf.reduce_mean(x_slices, axis=-1, keepdims=True)
+  sd = tf.math.reduce_std(x_slices, axis=-1, keepdims=True)
+  x_norm = (x_slices - mu) / (sd + eps)
+  x_norm = tf.reshape(x_norm, [bsize, -1 if seq_len is None else seq_len])
+  return x_norm, tf.squeeze(mu, axis=-1), tf.squeeze(sd, axis=-1)
+
+
+def slice_denormalize(x_norm, mu, sd, slice_len):
+  """De-normalizes each slice of length slice_len with given mean and std.
+
+  Args:
+    x_norm: Normalized tensor of shape [batch, seq_len].
+    mu: Slice means of shape [batch, num_slices] or [batch, num_slices, 1].
+    sd: Slice stds of shape [batch, num_slices] or [batch, num_slices, 1].
+    slice_len: Length of each temporal slice T.
+
+  Returns:
+    x_denorm: De-normalized tensor of shape [batch, seq_len].
+  """
+  bsize = tf.shape(x_norm)[0]
+  seq_len = x_norm.shape[1]
+  num_slices = seq_len // slice_len if seq_len is not None else -1
+  x_slices = tf.reshape(x_norm, [bsize, num_slices, slice_len])
+  mu = tf.reshape(mu, [bsize, num_slices, 1])
+  sd = tf.reshape(sd, [bsize, num_slices, 1])
+  x_denorm = x_slices * sd + mu
+  return tf.reshape(x_denorm, [bsize, -1 if seq_len is None else seq_len])
+
+
+def extract_slice_stats(ts, slice_len):
+  """Extracts per-slice mean and std for a time series.
+
+  Args:
+    ts: Time series tensor of shape [batch, seq_len].
+    slice_len: Length of each temporal slice T.
+
+  Returns:
+    mu: Slice means of shape [batch, num_slices].
+    sd: Slice stds of shape [batch, num_slices].
+  """
+  bsize = tf.shape(ts)[0]
+  seq_len = ts.shape[1]
+  num_slices = seq_len // slice_len if seq_len is not None else -1
+  slices = tf.reshape(ts, [bsize, num_slices, slice_len])
+  mu = tf.reduce_mean(slices, axis=-1)
+  sd = tf.math.reduce_std(slices, axis=-1)
+  return mu, sd
+
+
+class SanStatsNetwork(keras.layers.Layer):
+  """Predicts future slice statistics from past slice statistics."""
+
+  def __init__(self, num_future_slices, hidden_dim=64, **kwargs):
+    super(SanStatsNetwork, self).__init__(**kwargs)
+    self.num_future_slices = num_future_slices
+    self.hidden_dim = hidden_dim
+    self.mu_hidden = keras.layers.Dense(
+        hidden_dim, activation='relu', name='mu_hidden'
+    )
+    self.mu_out = keras.layers.Dense(
+        num_future_slices,
+        activation=None,
+        kernel_initializer='zeros',
+        bias_initializer='zeros',
+        name='mu_out',
+    )
+    self.sd_hidden = keras.layers.Dense(
+        hidden_dim, activation='relu', name='sd_hidden'
+    )
+    self.sd_out = keras.layers.Dense(
+        num_future_slices,
+        activation=None,
+        name='sd_out',
+    )
+
+  def call(self, mu_p, sd_p, mean_x):
+    """Predicts future slice statistics.
+
+    Args:
+      mu_p: Past slice means [batch, P].
+      sd_p: Past slice stds [batch, P].
+      mean_x: Overall lookback mean [batch, 1] or [batch].
+
+    Returns:
+      mu_hat: Predicted future slice means [batch, F].
+      sd_hat: Predicted future slice stds [batch, F].
+    """
+    if len(mean_x.shape) == 1:
+      mean_x = tf.expand_dims(mean_x, axis=-1)
+    stats_in = tf.concat([mu_p - mean_x, sd_p], axis=-1)
+    mu_h = self.mu_hidden(stats_in)
+    mu_residual = self.mu_out(mu_h)
+    mu_hat = mean_x + mu_residual
+    sd_h = self.sd_hidden(stats_in)
+    sd_hat = tf.nn.softplus(self.sd_out(sd_h)) + EPS
+    return mu_hat, sd_hat
+
+
 class MLPResidual(keras.layers.Layer):
   """Simple one hidden state residual network."""
 
@@ -94,6 +209,9 @@ class TideModel(keras.Model):
       cat_emb_size=4,
       layer_norm=False,
       dropout_rate=0.0,
+      san=False,
+      san_slice_len=24,
+      san_lambda=0.5,
   ):
     """Tide model.
 
@@ -106,11 +224,17 @@ class TideModel(keras.Model):
       cat_emb_size: embedding size of categorical variables.
       layer_norm: use layer norm or not.
       dropout_rate: level of dropout.
+      san: apply slice-level adaptive normalization (SAN) or not.
+      san_slice_len: slice length T for SAN.
+      san_lambda: auxiliary statistics loss weight lambda for SAN.
     """
     super().__init__()
     self.model_config = model_config
     self.transform = transform
-    if self.transform:
+    self.san = san
+    self.san_slice_len = san_slice_len
+    self.san_lambda = san_lambda
+    if self.transform or self.san:
       self.affine_weight = self.add_weight(
           name='affine_weight',
           shape=(num_ts,),
@@ -125,6 +249,10 @@ class TideModel(keras.Model):
           trainable=True,
       )
     self.pred_len = pred_len
+    if self.san:
+      self.san_stats_network = SanStatsNetwork(
+          num_future_slices=self.pred_len // self.san_slice_len
+      )
     self.encoder = _make_dnn_residual(
         model_config.get('hidden_dims'),
         layer_norm=layer_norm,
@@ -168,17 +296,25 @@ class TideModel(keras.Model):
       all_feats.append(tf.transpose(emb(cfeats[i, :])))
     return tf.concat(all_feats, axis=0)
 
-  @tf.function
-  def call(self, inputs):
-    """Call function that takes in a batch of training data and features."""
+  def _forward(self, inputs, training=False):
+    """Internal forward pass returning (forecast, mu_hat, sd_hat)."""
     past_data = inputs[0]
     future_features = inputs[1]
-    bsize = past_data[0].shape[0]
+    bsize = past_data[0].shape[0] if past_data[0].shape[0] is not None else tf.shape(past_data[0])[0]
     tsidx = inputs[2]
     past_feats = self._assemble_feats(past_data[1], past_data[2])
     future_feats = self._assemble_feats(future_features[0], future_features[1])
     past_ts = past_data[0]
-    if self.transform:
+    mu_hat = None
+    sd_hat = None
+    if self.san:
+      affine_weight = tf.gather(self.affine_weight, tsidx)
+      affine_bias = tf.gather(self.affine_bias, tsidx)
+      mean_x = tf.reduce_mean(past_ts, axis=1, keepdims=True)
+      past_ts_norm, mu_p, sd_p = slice_normalize(past_ts, self.san_slice_len)
+      past_ts = affine_weight[:, None] * past_ts_norm + affine_bias[:, None]
+      mu_hat, sd_hat = self.san_stats_network(mu_p, sd_p, mean_x)
+    elif self.transform:
       affine_weight = tf.gather(self.affine_weight, tsidx)
       affine_bias = tf.gather(self.affine_bias, tsidx)
       batch_mean = tf.math.reduce_mean(past_ts, axis=1)
@@ -212,17 +348,35 @@ class TideModel(keras.Model):
     out = self.final_decoder(tf.transpose(final_in, (0, 2, 1)))  # B x H x 1
     out = tf.squeeze(out, axis=-1)
     out += residual_out
-    if self.transform:
+    if self.san:
+      out = (out - affine_bias[:, None]) / (affine_weight[:, None] + EPS)
+      out = slice_denormalize(out, mu_hat, sd_hat, self.san_slice_len)
+    elif self.transform:
       out = (out - affine_bias[:, None]) / (affine_weight[:, None] + EPS)
       out = out * batch_std[:, None] + batch_mean[:, None]
+    return out, mu_hat, sd_hat
+
+  @tf.function
+  def call(self, inputs, training=False):
+    """Call function that takes in a batch of training data and features."""
+    out, _, _ = self._forward(inputs, training=training)
     return out
 
   @tf.function
   def train_step(self, past_data, future_features, ytrue, tsidx, optimizer):
     """One step of training."""
     with tf.GradientTape() as tape:
-      all_preds = self((past_data, future_features, tsidx), training=True)
-      loss = train_loss(ytrue, all_preds)
+      if self.san:
+        all_preds, mu_hat, sd_hat = self._forward(
+            (past_data, future_features, tsidx), training=True
+        )
+        pred_loss = train_loss(ytrue, all_preds)
+        mu_f, sd_f = extract_slice_stats(ytrue, self.san_slice_len)
+        stat_loss = train_loss(mu_f, mu_hat) + train_loss(sd_f, sd_hat)
+        loss = pred_loss + tf.cast(self.san_lambda, pred_loss.dtype) * stat_loss
+      else:
+        all_preds = self((past_data, future_features, tsidx), training=True)
+        loss = train_loss(ytrue, all_preds)
 
     grads = tape.gradient(loss, self.trainable_variables)
     optimizer.apply_gradients(zip(grads, self.trainable_variables))

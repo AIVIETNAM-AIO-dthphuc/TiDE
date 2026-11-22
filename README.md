@@ -60,3 +60,14 @@ python3 -m train \
 
 In the above command, `<new-dataset-name>` corresponds to the dictionary entry corresponding to your new dataset. The package does not include tools for hyper-parameter tuning which is left to the user.
 
+## Slice-level Adaptive Normalization (SAN)
+To enable Slice-level Adaptive Normalization (Liu et al., NeurIPS 2023):
+- `--san=true`: Replaces RevIN with slice-level normalization and statistics prediction.
+- `--san_slice_len=<int>`: Slice length T (default: 24). Must divide `hist_len` and `pred_len`.
+- `--san_lambda=<float>`: Auxiliary statistics loss weight lambda (default: 0.5).
+
+Example command:
+```bash
+python3 -m train --dataset=etth2 --pred_len=720 --san=true --san_slice_len=24 --san_lambda=0.5
+```
+
