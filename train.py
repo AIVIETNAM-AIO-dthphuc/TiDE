@@ -76,6 +76,9 @@ flags.DEFINE_integer('num_split', 1, 'Number of splits during inference')
 flags.DEFINE_integer('min_num_epochs', 0, 'Minimum epochs before early stopping')
 flags.DEFINE_integer('gpu', 0, 'GPU index; CPU is used if no GPU is available')
 
+# M09 improvement flag.
+flags.DEFINE_bool('use_time2vec', True, 'Enable Time2Vec encoding for time covariates (M09)')
+
 # Convenience arguments for notebook launches (aliases of original flags).
 flags.DEFINE_integer('seed', None, 'Alias for --random_seed')
 flags.DEFINE_integer('horizon', None, 'Alias for --pred_len')
@@ -168,7 +171,7 @@ def _run_config():
       'final_decoder_hidden', 'datetime_col', 'ts_cols', 'num_cov_cols',
       'cat_cov_cols', 'epoch_len', 'normalize', 'holiday', 'permute',
       'transform', 'layer_norm', 'dropout_rate', 'num_split',
-      'min_num_epochs', 'patience', 'train_epochs',
+      'min_num_epochs', 'patience', 'train_epochs', 'use_time2vec',
   )
   config = {key: getattr(FLAGS, key) for key in keys}
   config['run_id'] = FLAGS.run_id
@@ -344,6 +347,7 @@ def training():
       'decoder_output_dim': FLAGS.decoder_output_dim,
       'final_decoder_hidden': FLAGS.final_decoder_hidden,
       'batch_size': dtl.batch_size,
+      'use_time2vec': FLAGS.use_time2vec,
   }
   model = models.TideModel(
       model_config=model_config,

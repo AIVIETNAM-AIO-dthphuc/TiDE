@@ -1,3 +1,19 @@
+# M09: Mã hóa thời gian Time2Vec cho TiDE (`feat/m09`)
+
+## Sơ lược ý tưởng cải tiến
+- **Thành phần tác động:** Input Data (`time_features.py`) và đầu vào Feature Projection (`self.time_encoder` trong `models.py`).
+- **Vấn đề trong TiDE gốc:**
+  1. Chuẩn hóa tuyến tính về `[-0.5, 0.5]` cho 7 đặc trưng chu kỳ thời gian tạo ra điểm nhảy gián đoạn ở biên chu kỳ (ví dụ `23:00 = +0.5` nhảy về `00:00 = -0.5`) và lỗi lệch 1-indexed ở đặc trưng ngày/tháng (`month / 11.0 - 0.5` đạt `+0.591`).
+  2. Mạng MLP tiêu chuẩn chịu thiên kiến phổ (*spectral bias*), học chậm các biến thiên tuần hoàn tần số cao từ tọa độ thời gian tuyến tính.
+- **Giải pháp (M09):**
+  1. Chuẩn hóa lại 7 đặc trưng chu kỳ trong `time_features.py` theo đúng chu kỳ thực $P$ (bảo toàn khoảng cách đều trên đường tròn đơn vị và sửa lỗi 1-indexed).
+  2. Thêm lớp `Time2VecLayer` trong `models.py` ngay trước `self.time_encoder`, ánh xạ 7 biến chu kỳ đầu tiên thành 14 chiều liên tục học được $(\omega_0\tau + \varphi_0,\; \sin(\omega_1\tau + \varphi_1))$ (khởi tạo $\omega_0=1, \varphi_0=0, \omega_1=2\pi, \varphi_1=0$), giữ nguyên các cột ngày lễ/đệm phía sau, giữ nguyên $\tilde{r}=4$ và toàn bộ khối Encoder/Decoder.
+- **Chi phí tham số:** Tăng thêm `+504` tham số (`+28` tham số Time2Vec và `+476` tham số đầu vào `time_encoder`, `<0.005%` toàn mô hình), giữ nguyên độ phức tạp $O(L)$.
+- **Các file chỉnh sửa:** `time_features.py`, `models.py`, `train.py` (thêm cờ `--use_time2vec=true`), `README.md`.
+- **Tài liệu tham khảo:** Kazemi et al. (2019) *Time2Vec* (`arXiv:1907.05321`); Tancik et al. (2020) *Fourier Features* (`arXiv:2006.10739`); Das et al. (2023) *TiDE*.
+
+---
+
 # Long-term Forecasting with TiDE: Time-series Dense Encoder
 
 Authors: Abhimanyu Das, Weihao Kong, Andrew Leach, Shaan Mathur, Rajat Sen and Rose Yu

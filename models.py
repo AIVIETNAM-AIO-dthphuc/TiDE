@@ -26,6 +26,59 @@ EPS = 1e-7
 train_loss = keras.losses.MeanSquaredError()
 
 
+class Time2VecLayer(keras.layers.Layer):
+  """Time2Vec layer (M09) for the 7 cyclical time features (7 -> 14 dims)."""
+
+  def __init__(self, start_idx=0, num_time_features=7, **kwargs):
+    super(Time2VecLayer, self).__init__(**kwargs)
+    self.start_idx = start_idx
+    self.num_time_features = num_time_features
+
+  def build(self, input_shape):
+    # Linear branch: w0 * tau + b0 (initialized to identity at epoch 0)
+    self.w0 = self.add_weight(
+        name='t2v_w0',
+        shape=(self.num_time_features,),
+        initializer=tf.keras.initializers.Ones(),
+        trainable=True,
+    )
+    self.b0 = self.add_weight(
+        name='t2v_b0',
+        shape=(self.num_time_features,),
+        initializer=tf.keras.initializers.Zeros(),
+        trainable=True,
+    )
+    # Periodic branch: sin(w1 * tau + b1) (initialized to 2*pi to close cycle)
+    self.w1 = self.add_weight(
+        name='t2v_w1',
+        shape=(self.num_time_features,),
+        initializer=tf.keras.initializers.Constant(2.0 * np.pi),
+        trainable=True,
+    )
+    self.b1 = self.add_weight(
+        name='t2v_b1',
+        shape=(self.num_time_features,),
+        initializer=tf.keras.initializers.Zeros(),
+        trainable=True,
+    )
+    super(Time2VecLayer, self).build(input_shape)
+
+  def call(self, inputs):
+    """Apply Time2Vec to the 7 cyclical time covariates and keep other feats."""
+    end_idx = self.start_idx + self.num_time_features
+    cyc_feats = inputs[..., self.start_idx : end_idx]
+    after_feats = inputs[..., end_idx:]
+
+    linear_term = cyc_feats * self.w0 + self.b0
+    periodic_term = tf.math.sin(cyc_feats * self.w1 + self.b1)
+
+    parts = []
+    if self.start_idx > 0:
+      parts.append(inputs[..., : self.start_idx])
+    parts.extend([linear_term, periodic_term, after_feats])
+    return tf.concat(parts, axis=-1)
+
+
 class MLPResidual(keras.layers.Layer):
   """Simple one hidden state residual network."""
 
@@ -142,6 +195,9 @@ class TideModel(keras.Model):
         self.pred_len,
         activation=None,
     )
+    self.use_time2vec = model_config.get('use_time2vec', True)
+    if self.use_time2vec:
+      self.time2vec = Time2VecLayer(start_idx=0, num_time_features=7)
     self.time_encoder = _make_dnn_residual(
         model_config.get('time_encoder_dims'),
         layer_norm=layer_norm,
@@ -188,12 +244,13 @@ class TideModel(keras.Model):
       )
       past_ts = (past_ts - batch_mean[:, None]) / batch_std[:, None]
       past_ts = affine_weight[:, None] * past_ts + affine_bias[:, None]
-    encoded_past_feats = tf.transpose(
-        self.time_encoder(tf.transpose(past_feats))
-    )
-    encoded_future_feats = tf.transpose(
-        self.time_encoder(tf.transpose(future_feats))
-    )
+    past_feats_t = tf.transpose(past_feats)
+    future_feats_t = tf.transpose(future_feats)
+    if self.use_time2vec:
+      past_feats_t = self.time2vec(past_feats_t)
+      future_feats_t = self.time2vec(future_feats_t)
+    encoded_past_feats = tf.transpose(self.time_encoder(past_feats_t))
+    encoded_future_feats = tf.transpose(self.time_encoder(future_feats_t))
     enc_past = tf.repeat(tf.expand_dims(encoded_past_feats, axis=0), bsize, 0)
     enc_past = tf.reshape(enc_past, [bsize, -1])
     enc_fut = tf.repeat(

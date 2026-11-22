@@ -136,43 +136,43 @@ class TimeCovariates(object):
   def _minute_of_hour(self):
     minutes = np.array(self.dti.minute, dtype=np.float32)
     if self.normalized:
-      minutes = minutes / 59.0 - 0.5
+      minutes = minutes / 60.0 - 0.5
     return minutes
 
   def _hour_of_day(self):
     hours = np.array(self.dti.hour, dtype=np.float32)
     if self.normalized:
-      hours = hours / 23.0 - 0.5
+      hours = hours / 24.0 - 0.5
     return hours
 
   def _day_of_week(self):
     day_week = np.array(self.dti.dayofweek, dtype=np.float32)
     if self.normalized:
-      day_week = day_week / 6.0 - 0.5
+      day_week = day_week / 7.0 - 0.5
     return day_week
 
   def _day_of_month(self):
     day_month = np.array(self.dti.day, dtype=np.float32)
     if self.normalized:
-      day_month = day_month / 30.0 - 0.5
+      day_month = (day_month - 1.0) / 31.0 - 0.5
     return day_month
 
   def _day_of_year(self):
     day_year = np.array(self.dti.dayofyear, dtype=np.float32)
     if self.normalized:
-      day_year = day_year / 364.0 - 0.5
+      day_year = (day_year - 1.0) / 366.0 - 0.5
     return day_year
 
   def _month_of_year(self):
     month_year = np.array(self.dti.month, dtype=np.float32)
     if self.normalized:
-      month_year = month_year / 11.0 - 0.5
+      month_year = (month_year - 1.0) / 12.0 - 0.5
     return month_year
 
   def _week_of_year(self):
     week_year = np.array(self.dti.strftime("%U").astype(int), dtype=np.float32)
     if self.normalized:
-      week_year = week_year / 51.0 - 0.5
+      week_year = week_year / 53.0 - 0.5
     return week_year
 
   def _get_holidays(self):
