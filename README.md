@@ -68,6 +68,6 @@ To enable Slice-level Adaptive Normalization (Liu et al., NeurIPS 2023):
 
 Example command:
 ```bash
-python3 -m train --dataset=etth2 --pred_len=720 --san=true --san_slice_len=24 --san_lambda=0.5
+python3 -m train --dataset=etth2 --pred_len=720 --random_seed=1 --san=true --san_slice_len=24 --san_lambda=0.5
 ```
 

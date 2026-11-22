@@ -296,8 +296,9 @@ class TideModel(keras.Model):
       all_feats.append(tf.transpose(emb(cfeats[i, :])))
     return tf.concat(all_feats, axis=0)
 
-  def _forward(self, inputs, training=False):
-    """Internal forward pass returning (forecast, mu_hat, sd_hat)."""
+  @tf.function
+  def call(self, inputs):
+    """Call function that takes in a batch of training data and features."""
     past_data = inputs[0]
     future_features = inputs[1]
     bsize = past_data[0].shape[0] if past_data[0].shape[0] is not None else tf.shape(past_data[0])[0]
@@ -305,8 +306,6 @@ class TideModel(keras.Model):
     past_feats = self._assemble_feats(past_data[1], past_data[2])
     future_feats = self._assemble_feats(future_features[0], future_features[1])
     past_ts = past_data[0]
-    mu_hat = None
-    sd_hat = None
     if self.san:
       affine_weight = tf.gather(self.affine_weight, tsidx)
       affine_bias = tf.gather(self.affine_bias, tsidx)
@@ -354,29 +353,21 @@ class TideModel(keras.Model):
     elif self.transform:
       out = (out - affine_bias[:, None]) / (affine_weight[:, None] + EPS)
       out = out * batch_std[:, None] + batch_mean[:, None]
-    return out, mu_hat, sd_hat
-
-  @tf.function
-  def call(self, inputs, training=False):
-    """Call function that takes in a batch of training data and features."""
-    out, _, _ = self._forward(inputs, training=training)
     return out
 
   @tf.function
   def train_step(self, past_data, future_features, ytrue, tsidx, optimizer):
     """One step of training."""
     with tf.GradientTape() as tape:
+      all_preds = self((past_data, future_features, tsidx), training=True)
+      loss = train_loss(ytrue, all_preds)
       if self.san:
-        all_preds, mu_hat, sd_hat = self._forward(
-            (past_data, future_features, tsidx), training=True
-        )
-        pred_loss = train_loss(ytrue, all_preds)
+        mean_x = tf.reduce_mean(past_data[0], axis=1, keepdims=True)
+        _, mu_p, sd_p = slice_normalize(past_data[0], self.san_slice_len)
+        mu_hat, sd_hat = self.san_stats_network(mu_p, sd_p, mean_x)
         mu_f, sd_f = extract_slice_stats(ytrue, self.san_slice_len)
         stat_loss = train_loss(mu_f, mu_hat) + train_loss(sd_f, sd_hat)
-        loss = pred_loss + tf.cast(self.san_lambda, pred_loss.dtype) * stat_loss
-      else:
-        all_preds = self((past_data, future_features, tsidx), training=True)
-        loss = train_loss(ytrue, all_preds)
+        loss = loss + tf.cast(self.san_lambda, loss.dtype) * stat_loss
 
     grads = tape.gradient(loss, self.trainable_variables)
     optimizer.apply_gradients(zip(grads, self.trainable_variables))

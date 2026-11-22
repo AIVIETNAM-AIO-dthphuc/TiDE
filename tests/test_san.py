@@ -15,6 +15,9 @@
 
 """Unit tests for Slice-level Adaptive Normalization (SAN)."""
 
+import os
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+
 import math
 import unittest
 
@@ -189,15 +192,14 @@ class TestTideModelSan(unittest.TestCase):
         out = model((past_data, future_features, tsidx), training=False)
         self.assertEqual(out.shape, (batch_size, pred_len))
 
-        forecast, mu_hat, sd_hat = model._forward(
-            (past_data, future_features, tsidx), training=False
-        )
-        self.assertEqual(forecast.shape, (batch_size, pred_len))
+        mean_x = tf.reduce_mean(past_data[0], axis=1, keepdims=True)
+        _, mu_p, sd_p = models.slice_normalize(past_data[0], slice_len)
+        mu_hat, sd_hat = model.san_stats_network(mu_p, sd_p, mean_x)
         self.assertEqual(mu_hat.shape, (batch_size, pred_len // slice_len))
         self.assertEqual(sd_hat.shape, (batch_size, pred_len // slice_len))
 
   def test_train_step_loss_and_gradients(self):
-    """train_step with san=True returns MSE + lambda * stat_loss and updates with finite grads."""
+    """train_step with san=True returns MSE + lambda * stat_loss and updates with finite non-None grads."""
     hist_len, pred_len, slice_len = 720, 96, 24
     batch_size = 4
     san_lambda = 0.5
@@ -215,18 +217,53 @@ class TestTideModelSan(unittest.TestCase):
         batch_size, hist_len, pred_len
     )
 
-    # Compute expected loss on the exact same predictions/statistics before update.
-    preds, mu_hat, sd_hat = model._forward(
-        (past_data, future_features, tsidx), training=True
-    )
-    pred_mse = tf.reduce_mean(tf.square(ytrue - preds))
-    mu_f, sd_f = models.extract_slice_stats(ytrue, slice_len)
-    stat_mse = tf.reduce_mean(tf.square(mu_f - mu_hat)) + tf.reduce_mean(
-        tf.square(sd_f - sd_hat)
-    )
-    expected_total_loss = pred_mse + san_lambda * stat_mse
+    # Compute loss and gradients explicitly to inspect variable-level gradients
+    with tf.GradientTape() as tape:
+      preds = model((past_data, future_features, tsidx), training=True)
+      pred_mse = tf.reduce_mean(tf.square(ytrue - preds))
+      mean_x = tf.reduce_mean(past_data[0], axis=1, keepdims=True)
+      _, mu_p, sd_p = models.slice_normalize(past_data[0], slice_len)
+      mu_hat, sd_hat = model.san_stats_network(mu_p, sd_p, mean_x)
+      mu_f, sd_f = models.extract_slice_stats(ytrue, slice_len)
+      stat_mse = tf.reduce_mean(tf.square(mu_f - mu_hat)) + tf.reduce_mean(
+          tf.square(sd_f - sd_hat)
+      )
+      expected_total_loss = pred_mse + san_lambda * stat_mse
 
-    # Execute train_step.
+    grads = tape.gradient(expected_total_loss, model.trainable_variables)
+    var_to_grad = {v.name: g for v, g in zip(model.trainable_variables, grads)}
+
+    # Inspect the gradients for SAN statistics-network variables (both heads) and affine weights
+    mu_head_vars = [v for v in model.trainable_variables if 'mu_' in v.name]
+    sd_head_vars = [v for v in model.trainable_variables if 'sd_' in v.name]
+    affine_vars = [v for v in model.trainable_variables if 'affine_' in v.name]
+
+    self.assertTrue(len(mu_head_vars) > 0, 'No mu head variables found')
+    self.assertTrue(len(sd_head_vars) > 0, 'No sd head variables found')
+    self.assertTrue(len(affine_vars) > 0, 'No affine variables found')
+
+    # All SAN and affine variables must have non-None and finite gradients
+    for v in mu_head_vars + sd_head_vars + affine_vars:
+      g = var_to_grad[v.name]
+      self.assertIsNotNone(g, f'Gradient for {v.name} was None')
+      g_tensor = tf.convert_to_tensor(g)
+      self.assertTrue(
+          np.isfinite(g_tensor.numpy()).all(), f'Gradient for {v.name} was not finite'
+      )
+
+    # Output projection layers and affine weights must have non-zero gradients
+    non_zero_check_vars = [
+        v for v in model.trainable_variables
+        if any(target in v.name for target in ['mu_out', 'sd_out', 'affine_weight', 'affine_bias'])
+    ]
+    for v in non_zero_check_vars:
+      g = var_to_grad[v.name]
+      g_tensor = tf.convert_to_tensor(g)
+      self.assertTrue(
+          (np.abs(g_tensor.numpy()) > 0).any(), f'Gradient for {v.name} was all zeros'
+      )
+
+    # Execute train_step and verify returned loss equals expected loss
     actual_loss = model.train_step(
         past_data, future_features, ytrue, tsidx, optimizer
     )
@@ -235,12 +272,61 @@ class TestTideModelSan(unittest.TestCase):
         actual_loss.numpy(), expected_total_loss.numpy(), rtol=1e-4
     )
 
-    # Check that all trainable variables remain finite after gradient update.
-    for var in model.trainable_variables:
-      self.assertTrue(
-          np.isfinite(var.numpy()).all(),
-          f'Variable {var.name} has non-finite values.',
-      )
+  def test_dropout_behavior_and_loss_consistency(self):
+    """Build with training=False, lr=0: 3 train_step calls return identical losses for san=False and san=True;
+    and for san=True returned loss equals MSE(y, model(x)) + lambda * stat_loss computed independently."""
+    hist_len, pred_len, slice_len = 48, 24, 24
+    batch_size = 4
+    past_data, future_features, tsidx, ytrue = self._make_dummy_inputs(
+        batch_size, hist_len, pred_len
+    )
+
+    for san_val in [False, True]:
+      with self.subTest(san=san_val):
+        model = models.TideModel(
+            model_config=self.model_config,
+            pred_len=pred_len,
+            cat_sizes=self.cat_sizes,
+            num_ts=self.num_ts,
+            dropout_rate=0.5,
+            transform=True,
+            san=san_val,
+            san_slice_len=slice_len,
+            san_lambda=0.5,
+        )
+        # 1. Build model with training=False (like train.py does)
+        model((past_data, future_features, tsidx), training=False)
+
+        # 2. Three train_step calls with zero learning rate
+        opt = keras.optimizers.SGD(learning_rate=0.0)
+        losses = [
+            float(
+                model.train_step(
+                    past_data, future_features, ytrue, tsidx, opt
+                ).numpy()
+            )
+            for _ in range(3)
+        ]
+        # Losses must be identical (dropout is OFF)
+        self.assertEqual(
+            len(set(losses)),
+            1,
+            f'Expected identical losses with lr=0 and san={san_val}, got {losses}',
+        )
+
+        # 3. For san=True, check that returned loss equals MSE(y, model(x)) + lambda * stat_loss computed independently
+        if san_val:
+          preds = model((past_data, future_features, tsidx), training=True)
+          mse = tf.reduce_mean(tf.square(ytrue - preds))
+          mean_x = tf.reduce_mean(past_data[0], axis=1, keepdims=True)
+          _, mu_p, sd_p = models.slice_normalize(past_data[0], slice_len)
+          mu_hat, sd_hat = model.san_stats_network(mu_p, sd_p, mean_x)
+          mu_f, sd_f = models.extract_slice_stats(ytrue, slice_len)
+          stat_loss = tf.reduce_mean(
+              tf.square(mu_f - mu_hat)
+          ) + tf.reduce_mean(tf.square(sd_f - sd_hat))
+          expected = float((mse + 0.5 * stat_loss).numpy())
+          np.testing.assert_allclose(losses[0], expected, rtol=1e-4)
 
   def test_train_step_lambda_zero(self):
     """With san_lambda=0, train_step returns plain MSE loss."""
@@ -260,15 +346,15 @@ class TestTideModelSan(unittest.TestCase):
         batch_size, hist_len, pred_len
     )
 
-    preds, _, _ = model._forward(
-        (past_data, future_features, tsidx), training=True
-    )
+    preds = model((past_data, future_features, tsidx), training=True)
     expected_mse = tf.reduce_mean(tf.square(ytrue - preds))
 
     actual_loss = model.train_step(
         past_data, future_features, ytrue, tsidx, optimizer
     )
-    np.testing.assert_allclose(actual_loss.numpy(), expected_mse.numpy(), rtol=1e-4)
+    np.testing.assert_allclose(
+        actual_loss.numpy(), expected_mse.numpy(), rtol=1e-4
+    )
 
   def test_baseline_compatibility_san_false(self):
     """When san=False, model has no SAN layers and train_step returns plain MSE."""
@@ -299,7 +385,9 @@ class TestTideModelSan(unittest.TestCase):
     actual_loss = model.train_step(
         past_data, future_features, ytrue, tsidx, optimizer
     )
-    np.testing.assert_allclose(actual_loss.numpy(), expected_loss.numpy(), rtol=1e-4)
+    np.testing.assert_allclose(
+        actual_loss.numpy(), expected_loss.numpy(), rtol=1e-4
+    )
 
 
 class TestTrainFlagsAndValidation(unittest.TestCase):
@@ -364,20 +452,22 @@ class TestTrainFlagsAndValidation(unittest.TestCase):
       train._resolve_arguments()
 
   def test_resolve_arguments_indivisible_hist_len(self):
-    """_resolve_arguments raises ValueError if hist_len % T != 0."""
+    """_resolve_arguments raises ValueError if hist_len % T != 0 (while pred_len % T == 0)."""
     FLAGS.san = True
+    # 96 divides pred_len (96), but does NOT divide hist_len (336 % 96 == 48)
     FLAGS.hist_len = 336
-    FLAGS.san_slice_len = 96
     FLAGS.pred_len = 96
+    FLAGS.san_slice_len = 96
     with self.assertRaises(ValueError):
       train._resolve_arguments()
 
   def test_resolve_arguments_indivisible_pred_len(self):
-    """_resolve_arguments raises ValueError if pred_len % T != 0."""
+    """_resolve_arguments raises ValueError if pred_len % T != 0 (while hist_len % T == 0)."""
     FLAGS.san = True
+    # 30 divides hist_len (720 % 30 == 0), but does NOT divide pred_len (96 % 30 == 6)
     FLAGS.hist_len = 720
-    FLAGS.san_slice_len = 50
     FLAGS.pred_len = 96
+    FLAGS.san_slice_len = 30
     with self.assertRaises(ValueError):
       train._resolve_arguments()
 
