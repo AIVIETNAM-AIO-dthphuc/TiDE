@@ -28,6 +28,7 @@ should specify a unique --run_id and --resume=false.
 """
 
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -158,8 +159,14 @@ def _resolve_arguments():
     raise ValueError('--train_epochs cannot be negative.')
   if FLAGS.run_id is not None and not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', FLAGS.run_id):
     raise ValueError('--run_id must contain 1-64 letters, digits, underscores or hyphens.')
-  if FLAGS.freq_loss_alpha < 0.0 or FLAGS.freq_loss_alpha > 1.0:
-    raise ValueError(f'--freq_loss_alpha must be in [0, 1], got {FLAGS.freq_loss_alpha}.')
+  if (
+      not math.isfinite(FLAGS.freq_loss_alpha)
+      or FLAGS.freq_loss_alpha < 0.0
+      or FLAGS.freq_loss_alpha > 1.0
+  ):
+    raise ValueError(
+        f'--freq_loss_alpha must be a finite number in [0, 1], got {FLAGS.freq_loss_alpha}.'
+    )
   return 'electricity' if FLAGS.dataset == 'elec' else FLAGS.dataset
 
 

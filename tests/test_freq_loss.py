@@ -164,38 +164,78 @@ class FrequencyEnhancedLossTest(unittest.TestCase):
     self.assertEqual(model_custom.freq_loss_alpha, 0.75)
 
   def test_tide_model_train_step(self):
-    """TideModel.train_step executes cleanly with freq_loss_alpha."""
+    """TideModel.train_step uses freq_enhanced_loss with the model's alpha."""
     model_config = {
         'hidden_dims': [32],
         'time_encoder_dims': [16, 4],
         'decoder_output_dim': 2,
         'final_decoder_hidden': 8,
     }
-    model = models.TideModel(
-        model_config=model_config,
-        pred_len=96,
-        cat_sizes=[],
-        num_ts=2,
-        freq_loss_alpha=0.5,
-    )
-    optimizer = keras.optimizers.Adam(1e-3)
-    batch, hist_len, pred_len = 4, 16, 96
+    batch, hist_len, pred_len, num_ts = 4, 16, 96, 2
     past_data = (
-        tf.random.normal((batch, hist_len)),
-        tf.random.normal((2, hist_len)),
+        tf.random.normal((batch, hist_len), seed=1),
+        tf.random.normal((2, hist_len), seed=2),
         tf.zeros((0, hist_len), dtype=tf.int32),
     )
     future_features = (
-        tf.random.normal((2, pred_len)),
+        tf.random.normal((2, pred_len), seed=3),
         tf.zeros((0, pred_len), dtype=tf.int32),
     )
     tsidx = tf.zeros((batch,), dtype=tf.int32)
-    ytrue = tf.random.normal((batch, pred_len))
+    ytrue = tf.random.normal((batch, pred_len), seed=4)
 
-    loss = model.train_step(past_data, future_features, ytrue, tsidx, optimizer)
-    self.assertFalse(np.isnan(loss.numpy()))
-    self.assertFalse(np.isinf(loss.numpy()))
-    self.assertGreater(float(loss.numpy()), 0.0)
+    # 1. Test alpha = 0.5: loss must match freq_enhanced_loss(..., 0.5) and differ from MSE
+    model_half = models.TideModel(
+        model_config=model_config,
+        pred_len=pred_len,
+        cat_sizes=[],
+        num_ts=num_ts,
+        dropout_rate=0.0,
+        freq_loss_alpha=0.5,
+    )
+    optimizer_half = keras.optimizers.Adam(1e-3)
+    preds_half = model_half((past_data, future_features, tsidx), training=True)
+    expected_loss_half = models.freq_enhanced_loss(ytrue, preds_half, alpha=0.5)
+    plain_mse_half = keras.losses.MeanSquaredError()(ytrue, preds_half)
+
+    loss_half = model_half.train_step(
+        past_data, future_features, ytrue, tsidx, optimizer_half
+    )
+    self.assertAlmostEqual(
+        float(loss_half.numpy()),
+        float(expected_loss_half.numpy()),
+        places=5,
+        msg='train_step loss must equal freq_enhanced_loss with alpha=0.5',
+    )
+    self.assertNotAlmostEqual(
+        float(loss_half.numpy()),
+        float(plain_mse_half.numpy()),
+        places=2,
+        msg='train_step loss with alpha=0.5 must differ from plain MSE',
+    )
+
+    # 2. Test alpha = 0.0: loss must equal plain MSE
+    model_zero = models.TideModel(
+        model_config=model_config,
+        pred_len=pred_len,
+        cat_sizes=[],
+        num_ts=num_ts,
+        dropout_rate=0.0,
+        freq_loss_alpha=0.0,
+    )
+    optimizer_zero = keras.optimizers.Adam(1e-3)
+    preds_zero = model_zero((past_data, future_features, tsidx), training=True)
+    expected_mse_zero = keras.losses.MeanSquaredError()(ytrue, preds_zero)
+
+    loss_zero = model_zero.train_step(
+        past_data, future_features, ytrue, tsidx, optimizer_zero
+    )
+    self.assertAlmostEqual(
+        float(loss_zero.numpy()),
+        float(expected_mse_zero.numpy()),
+        places=5,
+        msg='train_step loss with alpha=0.0 must equal plain MSE',
+    )
 
   def test_run_config_compatibility(self):
     """_run_config has no freq_loss_alpha at alpha=0, but contains it at alpha!=0."""
@@ -221,7 +261,7 @@ class FrequencyEnhancedLossTest(unittest.TestCase):
     FLAGS.freq_loss_alpha = 0.0
 
   def test_freq_loss_alpha_validation(self):
-    """Values of freq_loss_alpha outside [0, 1] raise ValueError in _resolve_arguments."""
+    """Values of freq_loss_alpha outside [0, 1] or non-finite raise ValueError in _resolve_arguments."""
     FLAGS.random_seed = 1
     FLAGS.pred_len = 96
     FLAGS.dataset = 'elec'
@@ -231,8 +271,11 @@ class FrequencyEnhancedLossTest(unittest.TestCase):
       FLAGS.freq_loss_alpha = valid_alpha
       train._resolve_arguments()
 
-    # Invalid values must raise ValueError
-    for invalid_alpha in (-0.5, -0.01, 1.01, 2.0):
+    # Invalid values must raise ValueError: out of range and non-finite
+    for invalid_alpha in (
+        -0.5, -0.01, 1.01, 2.0,
+        float('nan'), float('inf'), float('-inf'),
+    ):
       FLAGS.freq_loss_alpha = invalid_alpha
       with self.assertRaises(ValueError):
         train._resolve_arguments()
