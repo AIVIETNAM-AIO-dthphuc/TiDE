@@ -26,6 +26,44 @@ EPS = 1e-7
 train_loss = keras.losses.MeanSquaredError()
 
 
+def freq_enhanced_loss(y_true, y_pred, alpha=0.0):
+  """Frequency-enhanced loss combining time-domain MSE and frequency-domain L1.
+
+  L = (1 - alpha) * MSE(y_pred, y_true) + alpha * mean(|rFFT(y_pred) - rFFT(y_true)|)
+  where rFFT is computed along the last axis (prediction horizon).
+
+  Args:
+    y_true: Ground truth tensor of shape [batch, pred_len].
+    y_pred: Prediction tensor of shape [batch, pred_len].
+    alpha: Float or scalar tensor in [0, 1] weighting time-domain MSE vs
+      frequency-domain L1.
+
+  Returns:
+    Scalar loss tensor.
+  """
+  if isinstance(alpha, (int, float)):
+    if alpha == 0.0:
+      return train_loss(y_true, y_pred)
+    y_true_f = tf.cast(y_true, tf.float32)
+    y_pred_f = tf.cast(y_pred, tf.float32)
+    freq_loss = tf.reduce_mean(
+        tf.abs(tf.signal.rfft(y_pred_f) - tf.signal.rfft(y_true_f))
+    )
+    if alpha == 1.0:
+      return freq_loss
+    mse_loss = tf.cast(train_loss(y_true, y_pred), tf.float32)
+    return tf.cast(1.0 - alpha, tf.float32) * mse_loss + tf.cast(alpha, tf.float32) * freq_loss
+
+  alpha_f = tf.cast(alpha, tf.float32)
+  y_true_f = tf.cast(y_true, tf.float32)
+  y_pred_f = tf.cast(y_pred, tf.float32)
+  freq_loss = tf.reduce_mean(
+      tf.abs(tf.signal.rfft(y_pred_f) - tf.signal.rfft(y_true_f))
+  )
+  mse_loss = tf.cast(train_loss(y_true, y_pred), tf.float32)
+  return (1.0 - alpha_f) * mse_loss + alpha_f * freq_loss
+
+
 class MLPResidual(keras.layers.Layer):
   """Simple one hidden state residual network."""
 
@@ -94,6 +132,7 @@ class TideModel(keras.Model):
       cat_emb_size=4,
       layer_norm=False,
       dropout_rate=0.0,
+      freq_loss_alpha=0.0,
   ):
     """Tide model.
 
@@ -106,6 +145,7 @@ class TideModel(keras.Model):
       cat_emb_size: embedding size of categorical variables.
       layer_norm: use layer norm or not.
       dropout_rate: level of dropout.
+      freq_loss_alpha: weight of frequency-enhanced loss in [0, 1].
     """
     super().__init__()
     self.model_config = model_config
@@ -159,6 +199,7 @@ class TideModel(keras.Model):
           tf.keras.layers.Embedding(input_dim=cat_size, output_dim=cat_emb_size)
       )
     self.ts_embs = tf.keras.layers.Embedding(input_dim=num_ts, output_dim=16)
+    self.freq_loss_alpha = freq_loss_alpha
 
   @tf.function
   def _assemble_feats(self, feats, cfeats):
@@ -222,7 +263,7 @@ class TideModel(keras.Model):
     """One step of training."""
     with tf.GradientTape() as tape:
       all_preds = self((past_data, future_features, tsidx), training=True)
-      loss = train_loss(ytrue, all_preds)
+      loss = freq_enhanced_loss(ytrue, all_preds, self.freq_loss_alpha)
 
     grads = tape.gradient(loss, self.trainable_variables)
     optimizer.apply_gradients(zip(grads, self.trainable_variables))

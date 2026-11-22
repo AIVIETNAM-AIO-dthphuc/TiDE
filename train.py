@@ -72,6 +72,7 @@ flags.DEFINE_bool('permute', True, 'Permute series during training')
 flags.DEFINE_bool('transform', False, 'Apply reversible transform')
 flags.DEFINE_bool('layer_norm', False, 'Apply layer norm')
 flags.DEFINE_float('dropout_rate', 0.0, 'Dropout rate')
+flags.DEFINE_float('freq_loss_alpha', 0.0, 'Weight of frequency-enhanced loss in [0, 1]. 0.0 is baseline MSE.')
 flags.DEFINE_integer('num_split', 1, 'Number of splits during inference')
 flags.DEFINE_integer('min_num_epochs', 0, 'Minimum epochs before early stopping')
 flags.DEFINE_integer('gpu', 0, 'GPU index; CPU is used if no GPU is available')
@@ -157,6 +158,8 @@ def _resolve_arguments():
     raise ValueError('--train_epochs cannot be negative.')
   if FLAGS.run_id is not None and not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', FLAGS.run_id):
     raise ValueError('--run_id must contain 1-64 letters, digits, underscores or hyphens.')
+  if FLAGS.freq_loss_alpha < 0.0 or FLAGS.freq_loss_alpha > 1.0:
+    raise ValueError(f'--freq_loss_alpha must be in [0, 1], got {FLAGS.freq_loss_alpha}.')
   return 'electricity' if FLAGS.dataset == 'elec' else FLAGS.dataset
 
 
@@ -172,6 +175,8 @@ def _run_config():
   )
   config = {key: getattr(FLAGS, key) for key in keys}
   config['run_id'] = FLAGS.run_id
+  if FLAGS.freq_loss_alpha != 0.0:
+    config['freq_loss_alpha'] = FLAGS.freq_loss_alpha
   return config
 
 
@@ -353,6 +358,7 @@ def training():
       transform=FLAGS.transform,
       layer_norm=FLAGS.layer_norm,
       dropout_rate=FLAGS.dropout_rate,
+      freq_loss_alpha=FLAGS.freq_loss_alpha,
   )
 
   # The decay schedule is unchanged from the supplied original code.
@@ -389,9 +395,9 @@ def training():
     if remote_info is not None and remote_info['epoch'] != int(epoch_counter.numpy()):
       raise RuntimeError('Drive snapshot metadata epoch disagrees with TF checkpoint epoch.')
 
-  logging.info('Run: dataset=%s seed=%d H=%d local=%s remote=%s',
-               drive_dataset, FLAGS.random_seed, FLAGS.pred_len, ckpt_dir,
-               backup.remote_snapshots if backup else '[disabled]')
+  logging.info('Run: dataset=%s seed=%d H=%d freq_loss_alpha=%s local=%s remote=%s',
+               drive_dataset, FLAGS.random_seed, FLAGS.pred_len, FLAGS.freq_loss_alpha,
+               ckpt_dir, backup.remote_snapshots if backup else '[disabled]')
   if bool(finished.numpy()):
     logging.info('This run is already marked complete. No further training performed.')
     return
