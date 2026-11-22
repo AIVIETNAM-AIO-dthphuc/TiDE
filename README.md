@@ -5,6 +5,7 @@
 - **Ý tưởng cải tiến:** Chèn một lớp tích chập 1D theo chiều sâu siêu nhẹ (`DepthwiseConv1D` với `kernel_size = 3`, `padding = 'same'`, `depth_multiplier = 1`, khởi tạo trọng số `zeros`) kết hợp kết nối dư (`residual`) ngay sau phép `Reshape` của `Dense Decoder` (transpose qua lại chuẩn `channels_last` `(B, H, p)`) trước khi nối ghép ngoại sinh tương lai đưa sang `Temporal Decoder` (`models.py#L211`).
 - **Cơ sở khoa học & Kỳ vọng:** Kế thừa TCN (Bai et al., 2018) về lọc cục bộ trên chuỗi thời gian. Chi phí tham số gần như bằng 0 (chỉ thêm `(k + 1) * p = 4 * 32 = 128` tham số ở `ETTh1/ETTh2`), giữ nguyên tốc độ song song `O(1)` trên GPU và làm mượt chuỗi dự báo giữa các bước lân cận.
 - **Cờ chạy dòng lệnh mới:** `--smooth_kernel_size=3` (đặt `--smooth_kernel_size=0` để quay về TiDE gốc).
+- **Sửa lỗi `LayerNorm` trên `final_decoder` (`output_dim=1`):** Đặt `layer_norm=False` riêng cho `self.final_decoder` để khắc phục lỗi `LayerNormalization(axis=-1)` trên tensor shape `(B, H, 1)` của TiDE gốc vốn triệt tiêu toàn bộ nhánh Encoder–Decoder về hằng số khi `--layer_norm=true`.
 
 ---
 
