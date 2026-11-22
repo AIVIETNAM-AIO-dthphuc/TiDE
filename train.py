@@ -70,6 +70,9 @@ flags.DEFINE_bool('normalize', True, 'Normalize data for training')
 flags.DEFINE_bool('holiday', False, 'Use holiday features')
 flags.DEFINE_bool('permute', True, 'Permute series during training')
 flags.DEFINE_bool('transform', False, 'Apply reversible transform')
+flags.DEFINE_bool('san', False, 'Apply slice-level adaptive normalization (SAN)')
+flags.DEFINE_integer('san_slice_len', 24, 'Slice length T for SAN')
+flags.DEFINE_float('san_lambda', 0.5, 'Weight of auxiliary statistics loss for SAN')
 flags.DEFINE_bool('layer_norm', False, 'Apply layer norm')
 flags.DEFINE_float('dropout_rate', 0.0, 'Dropout rate')
 flags.DEFINE_integer('num_split', 1, 'Number of splits during inference')
@@ -157,19 +160,36 @@ def _resolve_arguments():
     raise ValueError('--train_epochs cannot be negative.')
   if FLAGS.run_id is not None and not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', FLAGS.run_id):
     raise ValueError('--run_id must contain 1-64 letters, digits, underscores or hyphens.')
+  if FLAGS.san:
+    if FLAGS.san_slice_len <= 0:
+      raise ValueError(f'--san_slice_len must be positive, got {FLAGS.san_slice_len}.')
+    if FLAGS.hist_len % FLAGS.san_slice_len != 0:
+      raise ValueError(
+          f'--hist_len ({FLAGS.hist_len}) must be divisible by --san_slice_len ({FLAGS.san_slice_len}).'
+      )
+    if FLAGS.pred_len % FLAGS.san_slice_len != 0:
+      raise ValueError(
+          f'--pred_len ({FLAGS.pred_len}) must be divisible by --san_slice_len ({FLAGS.san_slice_len}).'
+      )
+    if not np.isfinite(FLAGS.san_lambda) or FLAGS.san_lambda < 0:
+      raise ValueError(
+          f'--san_lambda must be finite and non-negative (>= 0), got {FLAGS.san_lambda}.'
+      )
   return 'electricity' if FLAGS.dataset == 'elec' else FLAGS.dataset
 
 
 def _run_config():
   """Fields that must not silently change when resuming a training run."""
-  keys = (
+  keys = [
       'dataset', 'random_seed', 'hist_len', 'pred_len', 'batch_size',
       'learning_rate', 'num_layers', 'hidden_size', 'decoder_output_dim',
       'final_decoder_hidden', 'datetime_col', 'ts_cols', 'num_cov_cols',
       'cat_cov_cols', 'epoch_len', 'normalize', 'holiday', 'permute',
       'transform', 'layer_norm', 'dropout_rate', 'num_split',
       'min_num_epochs', 'patience', 'train_epochs',
-  )
+  ]
+  if FLAGS.san:
+    keys.extend(['san', 'san_slice_len', 'san_lambda'])
   config = {key: getattr(FLAGS, key) for key in keys}
   config['run_id'] = FLAGS.run_id
   return config
@@ -353,6 +373,9 @@ def training():
       transform=FLAGS.transform,
       layer_norm=FLAGS.layer_norm,
       dropout_rate=FLAGS.dropout_rate,
+      san=FLAGS.san,
+      san_slice_len=FLAGS.san_slice_len,
+      san_lambda=FLAGS.san_lambda,
   )
 
   # The decay schedule is unchanged from the supplied original code.
@@ -389,9 +412,17 @@ def training():
     if remote_info is not None and remote_info['epoch'] != int(epoch_counter.numpy()):
       raise RuntimeError('Drive snapshot metadata epoch disagrees with TF checkpoint epoch.')
 
-  logging.info('Run: dataset=%s seed=%d H=%d local=%s remote=%s',
-               drive_dataset, FLAGS.random_seed, FLAGS.pred_len, ckpt_dir,
-               backup.remote_snapshots if backup else '[disabled]')
+  if FLAGS.san and FLAGS.transform:
+    logging.info(
+        '--transform=true is ignored for normalization because --san=true is enabled.'
+    )
+
+  logging.info(
+      'Run: dataset=%s seed=%d H=%d san=%s local=%s remote=%s',
+      drive_dataset, FLAGS.random_seed, FLAGS.pred_len,
+      f'{FLAGS.san} (T={FLAGS.san_slice_len}, lambda={FLAGS.san_lambda})' if FLAGS.san else 'False',
+      ckpt_dir, backup.remote_snapshots if backup else '[disabled]',
+  )
   if bool(finished.numpy()):
     logging.info('This run is already marked complete. No further training performed.')
     return
