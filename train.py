@@ -72,6 +72,11 @@ flags.DEFINE_bool('holiday', False, 'Use holiday features')
 flags.DEFINE_bool('permute', True, 'Permute series during training')
 flags.DEFINE_bool('transform', False, 'Apply reversible transform')
 flags.DEFINE_bool('layer_norm', False, 'Apply layer norm')
+flags.DEFINE_bool(
+    'fix_final_decoder_ln', True,
+    'Disable layer norm in the final decoder (output dim 1), where it zeroes '
+    'all backbone gradients when --layer_norm=true. Set false to reproduce '
+    'the original (buggy) code and resume runs made before this fix.')
 flags.DEFINE_float('dropout_rate', 0.0, 'Dropout rate')
 flags.DEFINE_float('freq_loss_alpha', 0.0, 'Weight of frequency-enhanced loss in [0, 1]. 0.0 is baseline MSE.')
 flags.DEFINE_integer('num_split', 1, 'Number of splits during inference')
@@ -180,6 +185,8 @@ def _run_config():
       'transform', 'layer_norm', 'dropout_rate', 'num_split',
       'min_num_epochs', 'patience', 'train_epochs',
   )
+  if FLAGS.fix_final_decoder_ln:
+    keys += ('fix_final_decoder_ln',)
   config = {key: getattr(FLAGS, key) for key in keys}
   config['run_id'] = FLAGS.run_id
   if FLAGS.freq_loss_alpha != 0.0:
@@ -193,7 +200,9 @@ def _verify_or_write_config(folder: Path, config: dict):
   if config_file.exists():
     existing = json.loads(config_file.read_text(encoding='utf-8'))
     if existing != config:
-      differences = sorted(k for k in config if existing.get(k) != config[k])
+      differences = sorted(
+          k for k in set(config) | set(existing)
+          if k not in existing or k not in config or existing[k] != config[k])
       raise ValueError(
           f'Checkpoint configuration does not match current run: {differences}. '
           'Use the original hyperparameters or a NEW --run_id and --resume=false.'
@@ -366,6 +375,7 @@ def training():
       layer_norm=FLAGS.layer_norm,
       dropout_rate=FLAGS.dropout_rate,
       freq_loss_alpha=FLAGS.freq_loss_alpha,
+      fix_final_decoder_ln=FLAGS.fix_final_decoder_ln,
   )
 
   # The decay schedule is unchanged from the supplied original code.
@@ -402,9 +412,13 @@ def training():
     if remote_info is not None and remote_info['epoch'] != int(epoch_counter.numpy()):
       raise RuntimeError('Drive snapshot metadata epoch disagrees with TF checkpoint epoch.')
 
-  logging.info('Run: dataset=%s seed=%d H=%d freq_loss_alpha=%s local=%s remote=%s',
-               drive_dataset, FLAGS.random_seed, FLAGS.pred_len, FLAGS.freq_loss_alpha,
-               ckpt_dir, backup.remote_snapshots if backup else '[disabled]')
+  logging.info(
+      'Run: dataset=%s seed=%d H=%d freq_loss_alpha=%s fix_final_decoder_ln=%s '
+      'local=%s remote=%s',
+      drive_dataset, FLAGS.random_seed, FLAGS.pred_len, FLAGS.freq_loss_alpha,
+      FLAGS.fix_final_decoder_ln,
+      ckpt_dir, backup.remote_snapshots if backup else '[disabled]',
+  )
   if bool(finished.numpy()):
     logging.info('This run is already marked complete. No further training performed.')
     return

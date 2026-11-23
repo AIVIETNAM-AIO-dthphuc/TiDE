@@ -68,3 +68,12 @@ Use `--freq_loss_alpha` (default `0.0`, range `[0, 1]`) to control the frequency
 python3 -m train --dataset=electricity --pred_len=720 --random_seed=1 --freq_loss_alpha=0.5
 ```
 
+## Final decoder layer-norm fix
+With `--layer_norm=true`, the original code also applies layer norm to the final (temporal) decoder,
+whose output has a single feature. Layer norm over that axis always returns its bias, so the whole MLP
+backbone receives zero gradient; only the linear global residual (plus that layer-norm bias and the RevIN
+affine parameters) keeps learning.
+- `--fix_final_decoder_ln` (default `true`): no layer norm in the final decoder (other layers unchanged).
+- When enabled, the flag is added to `run_config.json`, so checkpoints made before the fix are never
+  resumed with it. Pass `--fix_final_decoder_ln=false` to reproduce the original code or resume old runs.
+
