@@ -207,7 +207,9 @@ def _verify_or_write_config(folder: Path, config: dict):
   if config_file.exists():
     existing = json.loads(config_file.read_text(encoding='utf-8'))
     if existing != config:
-      differences = sorted(k for k in config if existing.get(k) != config[k])
+      differences = sorted(
+          k for k in set(config) | set(existing)
+          if existing.get(k) != config.get(k))
       raise ValueError(
           f'Checkpoint configuration does not match current run: {differences}. '
           'Use the original hyperparameters or a NEW --run_id and --resume=false.'

@@ -74,7 +74,8 @@ python3 -m train --dataset=etth2 --pred_len=720 --random_seed=1 --san=true --san
 ## Final decoder layer-norm fix
 With `--layer_norm=true`, the original code also applies layer norm to the final (temporal) decoder,
 whose output has a single feature. Layer norm over that axis always returns its bias, so the whole MLP
-backbone receives zero gradient and only the linear global residual learns.
+backbone receives zero gradient; only the linear global residual (plus that layer-norm bias, the RevIN
+affine parameters and, with SAN, the statistics network) keeps learning.
 - `--fix_final_decoder_ln=true`: no layer norm in the final decoder (other layers unchanged).
 - Default `false` keeps the original behaviour, so earlier baselines/checkpoints stay reproducible.
   When enabled, the flag is added to `run_config.json`, so old checkpoints are never resumed with it.

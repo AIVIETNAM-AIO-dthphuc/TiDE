@@ -18,7 +18,9 @@
 import os
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
+import tempfile
 import unittest
+from pathlib import Path
 
 from absl import flags
 import models
@@ -133,6 +135,12 @@ class TestFinalDecoderLayerNorm(unittest.TestCase):
       self.assertTrue(
           any(grads[name] > 0 for name in kernels),
           f'{prefix} receives no gradient')
+    embedding_vars = [v.name for v in model.ts_embs.trainable_variables]
+    for emb in model.cat_embs:
+      embedding_vars += [v.name for v in emb.trainable_variables]
+    self.assertEqual(len(embedding_vars), 1 + len(model.cat_embs))
+    for name in embedding_vars:
+      self.assertGreater(grads[name], 0, f'{name} receives no gradient')
     for value in grads.values():
       self.assertTrue(np.isfinite(value))
 
@@ -182,6 +190,35 @@ class TestFixFlag(unittest.TestCase):
     config = train._run_config()
     self.assertIn('fix_final_decoder_ln', config)
     self.assertTrue(config['fix_final_decoder_ln'])
+
+  def _resume(self, saved_flags, current_flags):
+    """Writes run_config with saved_flags, then verifies with current_flags."""
+    with tempfile.TemporaryDirectory() as tmp:
+      folder = Path(tmp)
+      for key, value in saved_flags.items():
+        setattr(FLAGS, key, value)
+      train._verify_or_write_config(folder, train._run_config())
+      for key, value in current_flags.items():
+        setattr(FLAGS, key, value)
+      train._verify_or_write_config(folder, train._run_config())
+
+  def test_resume_legacy_configs_accepted(self):
+    for san in (False, True):
+      flags_ = {'san': san, 'fix_final_decoder_ln': False}
+      self._resume(flags_, flags_)
+
+  def test_resume_same_fix_accepted(self):
+    for san in (False, True):
+      flags_ = {'san': san, 'fix_final_decoder_ln': True}
+      self._resume(flags_, flags_)
+
+  def test_resume_with_changed_fix_rejected(self):
+    for san in (False, True):
+      for saved, current in ((False, True), (True, False)):
+        with self.subTest(san=san, saved=saved):
+          with self.assertRaisesRegex(ValueError, 'fix_final_decoder_ln'):
+            self._resume({'san': san, 'fix_final_decoder_ln': saved},
+                         {'san': san, 'fix_final_decoder_ln': current})
 
 
 if __name__ == '__main__':
