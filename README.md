@@ -8,6 +8,19 @@ Paper link: https://arxiv.org/abs/2304.08424
 > Recent work has shown that simple linear models can outperform several Transformer based approaches in long term time-series forecasting. Motivated by this, we propose a Multi-layer Perceptron (MLP) based encoder-decoder model, Time-series Dense Encoder (TiDE), for long-term time-series forecasting that enjoys the simplicity and speed of linear models while also being able to handle covariates and non-linear dependencies. Theoretically, we prove that the simplest linear analogue of our model can achieve near optimal error rate for linear dynamical systems (LDS) under some assumptions. Empirically, we  show that our method can match or outperform prior approaches on popular long-term time-series forecasting benchmarks while being 5-10x faster than the best Transformer based model.
 
 
+## Bug fixes in this branch
+Two bugs from the original code are fixed and enabled by default:
+- `--fix_final_decoder_ln` (default `true`): with `--layer_norm=true` the final decoder (output size 1)
+  applied layer norm over a size-1 axis, which always returns its bias, so the whole MLP backbone got
+  zero gradient and only the linear residual (plus RevIN affine) learned. The fix drops layer norm in
+  the final decoder only.
+- `--fix_dropout` (default `true`): `TideModel.call` is a `tf.function` without a `training`
+  argument, so the first trace fixed the dropout mode for the whole run (original code: dropout also
+  on at evaluation; this repo: never on). The fix makes dropout active in training only.
+
+Each enabled fix is written to `run_config.json`, so checkpoints from before the fixes are not resumed
+silently. Pass `--fix_final_decoder_ln=false --fix_dropout=false` to reproduce or resume older runs.
+
 ## Code Organisation
 The model is implemented in `models.py`. The main training loop is in `train.py` where in the input flags are defined. The dataloader is implemented in `data_loader.py`. The file `time_features.py` contains some utilities to convert the datetime into numerical features.
 
