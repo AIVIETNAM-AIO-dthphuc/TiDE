@@ -236,6 +236,11 @@ class TestLegacyCompatibility(unittest.TestCase):
   """With both fixes off the model matches the pre-fix code."""
 
   def test_checkpoint_from_base_code_restores_and_matches(self):
+    for layer_norm in (True, False):
+      with self.subTest(layer_norm=layer_norm):
+        self._check_parity(layer_norm)
+
+  def _check_parity(self, layer_norm):
     with tempfile.TemporaryDirectory() as tmp:
       base_models = _load_base_models(tmp)
       if base_models is None:
@@ -243,14 +248,14 @@ class TestLegacyCompatibility(unittest.TestCase):
       past, fut, tsidx, ytrue = _inputs()
       tf.random.set_seed(0)
       base = base_models.TideModel(
-          _CONFIG, _H, [3], _NUM_TS, transform=True, layer_norm=True,
+          _CONFIG, _H, [3], _NUM_TS, transform=True, layer_norm=layer_norm,
           dropout_rate=0.5)
       base((past, fut, tsidx), training=False)  # Same build as train.py.
       base.train_step(past, fut, ytrue, tsidx, tf.keras.optimizers.Adam(1e-2))
       ckpt_path = tf.train.Checkpoint(model=base).save(
           os.path.join(tmp, 'ckpt'))
 
-      new = _model(fix_ln=False, fix_dropout=False)
+      new = _model(fix_ln=False, fix_dropout=False, layer_norm=layer_norm)
       new((past, fut, tsidx), training=False)
       self.assertEqual(
           [v.shape for v in base.trainable_variables],
@@ -341,6 +346,16 @@ class TestFlagsAndRunConfig(unittest.TestCase):
       current = {k: v for k, v in config.items() if k != 'run_id'}
       with self.assertRaisesRegex(ValueError, 'run_id'):
         train._verify_or_write_config(folder, current)
+
+  def test_mismatch_reports_null_key_missing_in_saved(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      folder = Path(tmp)
+      config = train._run_config()
+      self.assertIsNone(config['run_id'])
+      saved = {k: v for k, v in config.items() if k != 'run_id'}
+      train._verify_or_write_config(folder, saved)
+      with self.assertRaisesRegex(ValueError, 'run_id'):
+        train._verify_or_write_config(folder, config)
 
   def test_mismatch_reports_key_with_null_value(self):
     with tempfile.TemporaryDirectory() as tmp:
