@@ -18,6 +18,8 @@
 import os
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
+import importlib.util
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -202,6 +204,65 @@ class TestDropout(unittest.TestCase):
     self.assertTrue(any(not np.allclose(b, a) for b, a in zip(before, after)))
 
 
+_BASE_COMMIT = '00bd321'  # main before these fixes.
+_LEGACY_KEYS = (
+    'dataset', 'random_seed', 'hist_len', 'pred_len', 'batch_size',
+    'learning_rate', 'num_layers', 'hidden_size', 'decoder_output_dim',
+    'final_decoder_hidden', 'datetime_col', 'ts_cols', 'num_cov_cols',
+    'cat_cov_cols', 'epoch_len', 'normalize', 'holiday', 'permute',
+    'transform', 'layer_norm', 'dropout_rate', 'num_split',
+    'min_num_epochs', 'patience', 'train_epochs', 'run_id',
+)
+
+
+def _load_base_models(tmp):
+  """Imports models.py from the pre-fix commit, or returns None."""
+  repo = Path(__file__).resolve().parents[1]
+  try:
+    src = subprocess.run(
+        ['git', 'show', f'{_BASE_COMMIT}:models.py'], cwd=repo, check=True,
+        capture_output=True, text=True).stdout
+  except (OSError, subprocess.CalledProcessError):
+    return None
+  path = Path(tmp) / 'base_models.py'
+  path.write_text(src, encoding='utf-8')
+  spec = importlib.util.spec_from_file_location('base_models', path)
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  return module
+
+
+class TestLegacyCompatibility(unittest.TestCase):
+  """With both fixes off the model matches the pre-fix code."""
+
+  def test_checkpoint_from_base_code_restores_and_matches(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      base_models = _load_base_models(tmp)
+      if base_models is None:
+        self.skipTest('pre-fix commit not available')
+      past, fut, tsidx, ytrue = _inputs()
+      tf.random.set_seed(0)
+      base = base_models.TideModel(
+          _CONFIG, _H, [3], _NUM_TS, transform=True, layer_norm=True,
+          dropout_rate=0.5)
+      base((past, fut, tsidx), training=False)  # Same build as train.py.
+      base.train_step(past, fut, ytrue, tsidx, tf.keras.optimizers.Adam(1e-2))
+      ckpt_path = tf.train.Checkpoint(model=base).save(
+          os.path.join(tmp, 'ckpt'))
+
+      new = _model(fix_ln=False, fix_dropout=False)
+      new((past, fut, tsidx), training=False)
+      self.assertEqual(
+          [v.shape for v in base.trainable_variables],
+          [v.shape for v in new.trainable_variables])
+      tf.train.Checkpoint(model=new).restore(ckpt_path).assert_consumed()
+      for mode in (False, True):
+        np.testing.assert_allclose(
+            base((past, fut, tsidx), training=mode).numpy(),
+            new((past, fut, tsidx), training=mode).numpy(),
+            rtol=1e-6, atol=1e-6)
+
+
 class TestFlagsAndRunConfig(unittest.TestCase):
   _KEYS = ('fix_final_decoder_ln', 'fix_dropout')
 
@@ -266,6 +327,20 @@ class TestFlagsAndRunConfig(unittest.TestCase):
       self._set(True, True)
       with self.assertRaisesRegex(ValueError, 'fix_dropout'):
         train._verify_or_write_config(folder, train._run_config())
+
+  def test_fixes_off_gives_legacy_run_config_keys(self):
+    self._set(False, False)
+    self.assertEqual(set(train._run_config()), set(_LEGACY_KEYS))
+
+  def test_mismatch_reports_null_key_missing_in_current(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      folder = Path(tmp)
+      config = train._run_config()
+      self.assertIsNone(config['run_id'])
+      train._verify_or_write_config(folder, config)
+      current = {k: v for k, v in config.items() if k != 'run_id'}
+      with self.assertRaisesRegex(ValueError, 'run_id'):
+        train._verify_or_write_config(folder, current)
 
   def test_mismatch_reports_key_with_null_value(self):
     with tempfile.TemporaryDirectory() as tmp:
