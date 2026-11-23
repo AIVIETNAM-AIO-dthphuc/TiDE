@@ -138,6 +138,7 @@ class TideModel(keras.Model):
       layer_norm=False,
       dropout_rate=0.0,
       freq_loss_alpha=0.0,
+      fix_final_decoder_ln=True,
   ):
     """Tide model.
 
@@ -151,10 +152,15 @@ class TideModel(keras.Model):
       layer_norm: use layer norm or not.
       dropout_rate: level of dropout.
       freq_loss_alpha: weight of frequency-enhanced loss in [0, 1].
+      fix_final_decoder_ln: if True, never apply layer norm in the final
+        (temporal) decoder. Its output has a single feature, so layer norm
+        over the last axis always returns the constant beta and blocks all
+        gradients to the MLP backbone. Set False to reproduce the original code.
     """
     super().__init__()
     self.model_config = model_config
     self.transform = transform
+    self.fix_final_decoder_ln = fix_final_decoder_ln
     if self.transform:
       self.affine_weight = self.add_weight(
           name='affine_weight',
@@ -195,7 +201,7 @@ class TideModel(keras.Model):
     self.final_decoder = MLPResidual(
         hidden_dim=model_config.get('final_decoder_hidden'),
         output_dim=1,
-        layer_norm=layer_norm,
+        layer_norm=layer_norm and not fix_final_decoder_ln,
         dropout_rate=dropout_rate,
     )
     self.cat_embs = []
