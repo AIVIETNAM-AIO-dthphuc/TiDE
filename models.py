@@ -94,6 +94,8 @@ class TideModel(keras.Model):
       cat_emb_size=4,
       layer_norm=False,
       dropout_rate=0.0,
+      fix_final_decoder_ln=True,
+      fix_dropout=True,
   ):
     """Tide model.
 
@@ -106,9 +108,23 @@ class TideModel(keras.Model):
       cat_emb_size: embedding size of categorical variables.
       layer_norm: use layer norm or not.
       dropout_rate: level of dropout.
+      fix_final_decoder_ln: if True, never apply layer norm in the final
+        (temporal) decoder. Its output has a single feature, so layer norm
+        over the last axis always returns the constant beta and blocks all
+        gradients to the MLP backbone. Set False to reproduce the original code.
+      fix_dropout: if True, `call` takes a `training` argument so dropout is
+        active in training and inactive in evaluation. In the original code
+        `call` is a tf.function without that argument, so the first trace fixes
+        the dropout mode for the whole run; with the checkpoint-restore build
+        step in train.py that mode is inference, i.e. dropout never runs. Set
+        False to reproduce that behaviour (dropout disabled everywhere).
     """
     super().__init__()
     self.model_config = model_config
+    self.fix_final_decoder_ln = fix_final_decoder_ln
+    self.fix_dropout = fix_dropout
+    if not fix_dropout:
+      dropout_rate = 0.0
     self.transform = transform
     if self.transform:
       self.affine_weight = self.add_weight(
@@ -150,7 +166,7 @@ class TideModel(keras.Model):
     self.final_decoder = MLPResidual(
         hidden_dim=model_config.get('final_decoder_hidden'),
         output_dim=1,
-        layer_norm=layer_norm,
+        layer_norm=layer_norm and not fix_final_decoder_ln,
         dropout_rate=dropout_rate,
     )
     self.cat_embs = []
@@ -169,7 +185,7 @@ class TideModel(keras.Model):
     return tf.concat(all_feats, axis=0)
 
   @tf.function
-  def call(self, inputs):
+  def call(self, inputs, training=None):
     """Call function that takes in a batch of training data and features."""
     past_data = inputs[0]
     future_features = inputs[1]
