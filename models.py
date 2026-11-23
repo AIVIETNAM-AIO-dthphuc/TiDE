@@ -212,7 +212,7 @@ class TideModel(keras.Model):
       san=False,
       san_slice_len=24,
       san_lambda=0.5,
-      fix_final_decoder_ln=False,
+      fix_final_decoder_ln=True,
   ):
     """Tide model.
 
@@ -231,7 +231,7 @@ class TideModel(keras.Model):
       fix_final_decoder_ln: if True, never apply layer norm in the final
         (temporal) decoder. Its output has a single feature, so layer norm
         over the last axis always returns the constant beta and blocks all
-        gradients to the MLP backbone. Default False keeps the original code.
+        gradients to the MLP backbone. Set False to reproduce the original code.
     """
     super().__init__()
     self.model_config = model_config

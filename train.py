@@ -75,9 +75,10 @@ flags.DEFINE_integer('san_slice_len', 24, 'Slice length T for SAN')
 flags.DEFINE_float('san_lambda', 0.5, 'Weight of auxiliary statistics loss for SAN')
 flags.DEFINE_bool('layer_norm', False, 'Apply layer norm')
 flags.DEFINE_bool(
-    'fix_final_decoder_ln', False,
+    'fix_final_decoder_ln', True,
     'Disable layer norm in the final decoder (output dim 1), where it zeroes '
-    'all backbone gradients when --layer_norm=true. Default keeps original code.')
+    'all backbone gradients when --layer_norm=true. Set false to reproduce '
+    'the original (buggy) code and resume runs made before this fix.')
 flags.DEFINE_float('dropout_rate', 0.0, 'Dropout rate')
 flags.DEFINE_integer('num_split', 1, 'Number of splits during inference')
 flags.DEFINE_integer('min_num_epochs', 0, 'Minimum epochs before early stopping')

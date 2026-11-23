@@ -83,7 +83,14 @@ class TestFinalDecoderLayerNorm(unittest.TestCase):
         _CONFIG, _H, [3], _NUM_TS, transform=True, layer_norm=layer_norm,
         fix_final_decoder_ln=fix, **kwargs)
 
-  def test_default_keeps_original_layer_norm(self):
+  def test_model_default_applies_fix(self):
+    tf.random.set_seed(0)
+    model = models.TideModel(
+        _CONFIG, _H, [3], _NUM_TS, transform=True, layer_norm=True)
+    self.assertTrue(model.fix_final_decoder_ln)
+    self.assertFalse(model.final_decoder.layer_norm)
+
+  def test_fix_false_keeps_original_layer_norm(self):
     model = self._model(fix=False)
     self.assertFalse(model.fix_final_decoder_ln)
     self.assertTrue(model.final_decoder.layer_norm)
@@ -178,8 +185,8 @@ class TestFixFlag(unittest.TestCase):
       setattr(FLAGS, k, v)
     super().tearDown()
 
-  def test_flag_default_false(self):
-    self.assertFalse(FLAGS['fix_final_decoder_ln'].default)
+  def test_flag_default_true(self):
+    self.assertTrue(FLAGS['fix_final_decoder_ln'].default)
 
   def test_run_config_without_fix_has_no_key(self):
     FLAGS.fix_final_decoder_ln = False
