@@ -212,6 +212,7 @@ class TideModel(keras.Model):
       san=False,
       san_slice_len=24,
       san_lambda=0.5,
+      fix_final_decoder_ln=True,
   ):
     """Tide model.
 
@@ -227,6 +228,10 @@ class TideModel(keras.Model):
       san: apply slice-level adaptive normalization (SAN) or not.
       san_slice_len: slice length T for SAN.
       san_lambda: auxiliary statistics loss weight lambda for SAN.
+      fix_final_decoder_ln: if True, never apply layer norm in the final
+        (temporal) decoder. Its output has a single feature, so layer norm
+        over the last axis always returns the constant beta and blocks all
+        gradients to the MLP backbone. Set False to reproduce the original code.
     """
     super().__init__()
     self.model_config = model_config
@@ -234,6 +239,7 @@ class TideModel(keras.Model):
     self.san = san
     self.san_slice_len = san_slice_len
     self.san_lambda = san_lambda
+    self.fix_final_decoder_ln = fix_final_decoder_ln
     if self.transform or self.san:
       self.affine_weight = self.add_weight(
           name='affine_weight',
@@ -278,7 +284,7 @@ class TideModel(keras.Model):
     self.final_decoder = MLPResidual(
         hidden_dim=model_config.get('final_decoder_hidden'),
         output_dim=1,
-        layer_norm=layer_norm,
+        layer_norm=layer_norm and not fix_final_decoder_ln,
         dropout_rate=dropout_rate,
     )
     self.cat_embs = []
