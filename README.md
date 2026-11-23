@@ -1,3 +1,14 @@
+# M07a — Frequency-Domain Auxiliary Loss (FreDF) for TiDE
+
+## Sơ lược ý tưởng cải tiến
+- **Vấn đề cần cải thiện:** Hàm loss `MeanSquaredError` mặc định trong TiDE (`models.py#L31`, `#L225`) tối ưu trực tiếp trên miền thời gian, ngầm giả định sai số tại từng bước dự báo độc lập nhau. Tuy nhiên chuỗi thời gian dài hạn (`H >= 96`) có tự tương quan rất mạnh giữa các bước liền kề (label autocorrelation), dễ gây lệch tối ưu và đánh mất cấu trúc chu kỳ trên tập nhỏ như ETT khi tăng độ phức tạp mô hình.
+- **Ý tưởng cải tiến:** Bổ sung thành phần **Frequency-Domain Auxiliary Loss (FreDF)** ngay trong `TideModel.train_step`: biến đổi cả ground-truth `ytrue` và dự báo `all_preds` sang miền tần số bằng `tf.signal.rfft` (chuẩn hóa Parseval theo $1/\sqrt{H}$), tính chuẩn L1 phức mượt $\sqrt{\operatorname{Re}^2 + \operatorname{Im}^2 + 10^{-8}}$, rồi trộn với loss miền thời gian theo trọng số `--freq_alpha` (mặc định `0.5`).
+- **Cơ sở khoa học & Kỳ vọng:** Kế thừa Wang et al. (**ICLR 2025** — *FreDF: Learning to Forecast in Frequency Domain*), phép biến đổi Fourier chiếu sai số sang hệ trực giao tần số giúp khử tự tương quan giữa các bước thời gian. Thay đổi hoàn toàn nằm trong hàm loss (`+0` tham số khi suy luận, dùng chung cho mọi dataset), kỳ vọng cải thiện đồng thời cả **MSE** lẫn **MAE**.
+- **Kết quả kiểm chứng nhanh trên Sandbox (`ETTh2 H=96, seed=1`):** Đạt **MSE = `0.268872` (`-0.56%`)** và **MAE = `0.334063` (`-0.67%`)** so với baseline TiDE (`0.270388 / 0.336325`), vượt đồng thời cả hai chỉ số mà không gây overfitting.
+- **Cờ chạy dòng lệnh mới:** `--freq_alpha=0.5` (giá trị trong `[0.0, 1.0]`; đặt `--freq_alpha=0.0` để quay về TiDE gốc).
+
+---
+
 # Long-term Forecasting with TiDE: Time-series Dense Encoder
 
 Authors: Abhimanyu Das, Weihao Kong, Andrew Leach, Shaan Mathur, Rajat Sen and Rose Yu

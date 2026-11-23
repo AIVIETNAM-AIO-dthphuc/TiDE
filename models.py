@@ -125,6 +125,7 @@ class TideModel(keras.Model):
           trainable=True,
       )
     self.pred_len = pred_len
+    self.freq_alpha = float(model_config.get('freq_alpha', 0.0))
     self.encoder = _make_dnn_residual(
         model_config.get('hidden_dims'),
         layer_norm=layer_norm,
@@ -223,6 +224,23 @@ class TideModel(keras.Model):
     with tf.GradientTape() as tape:
       all_preds = self((past_data, future_features, tsidx), training=True)
       loss = train_loss(ytrue, all_preds)
+      if self.freq_alpha > 0.0:
+        diff_f = tf.signal.rfft(tf.cast(ytrue, tf.float32)) - tf.signal.rfft(
+            tf.cast(all_preds, tf.float32)
+        )
+        scale = 1.0 / tf.sqrt(tf.cast(self.pred_len, tf.float32))
+        diff_f = diff_f * tf.cast(scale, diff_f.dtype)
+        freq_loss = tf.reduce_mean(
+            tf.sqrt(
+                tf.square(tf.math.real(diff_f))
+                + tf.square(tf.math.imag(diff_f))
+                + 1e-8
+            )
+        )
+        loss = (
+            (1.0 - self.freq_alpha) * tf.cast(loss, tf.float32)
+            + self.freq_alpha * freq_loss
+        )
 
     grads = tape.gradient(loss, self.trainable_variables)
     optimizer.apply_gradients(zip(grads, self.trainable_variables))

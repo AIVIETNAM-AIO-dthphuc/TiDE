@@ -64,6 +64,11 @@ flags.DEFINE_integer('num_layers', 2, 'Number of DNN layers')
 flags.DEFINE_integer('hidden_size', 256, 'Hidden size of DNN')
 flags.DEFINE_integer('decoder_output_dim', 4, 'Decoder output dimension')
 flags.DEFINE_integer('final_decoder_hidden', 64, 'Final decoder hidden dimension')
+flags.DEFINE_float(
+    'freq_alpha',
+    0.5,
+    'Weight of FreDF frequency-domain L1 loss in [0.0, 1.0] (0.0 to disable)',
+)
 flags.DEFINE_list('ts_cols', None, 'Columns of time-series features')
 flags.DEFINE_integer('random_seed', None, 'Random seed for TF and NumPy')
 flags.DEFINE_bool('normalize', True, 'Normalize data for training')
@@ -155,6 +160,8 @@ def _resolve_arguments():
     raise ValueError('--backup_every and --max_to_keep must be positive integers.')
   if FLAGS.train_epochs < 0:
     raise ValueError('--train_epochs cannot be negative.')
+  if not 0.0 <= FLAGS.freq_alpha <= 1.0:
+    raise ValueError('--freq_alpha must be in [0.0, 1.0].')
   if FLAGS.run_id is not None and not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', FLAGS.run_id):
     raise ValueError('--run_id must contain 1-64 letters, digits, underscores or hyphens.')
   return 'electricity' if FLAGS.dataset == 'elec' else FLAGS.dataset
@@ -165,7 +172,7 @@ def _run_config():
   keys = (
       'dataset', 'random_seed', 'hist_len', 'pred_len', 'batch_size',
       'learning_rate', 'num_layers', 'hidden_size', 'decoder_output_dim',
-      'final_decoder_hidden', 'datetime_col', 'ts_cols', 'num_cov_cols',
+      'final_decoder_hidden', 'freq_alpha', 'datetime_col', 'ts_cols', 'num_cov_cols',
       'cat_cov_cols', 'epoch_len', 'normalize', 'holiday', 'permute',
       'transform', 'layer_norm', 'dropout_rate', 'num_split',
       'min_num_epochs', 'patience', 'train_epochs',
@@ -343,6 +350,7 @@ def training():
       'time_encoder_dims': [64, 4],
       'decoder_output_dim': FLAGS.decoder_output_dim,
       'final_decoder_hidden': FLAGS.final_decoder_hidden,
+      'freq_alpha': FLAGS.freq_alpha,
       'batch_size': dtl.batch_size,
   }
   model = models.TideModel(
