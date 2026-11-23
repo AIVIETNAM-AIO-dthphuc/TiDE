@@ -60,7 +60,7 @@ def _backbone_grad_norms(model, past, fut, tsidx, ytrue):
   """Returns {variable name: max |grad|} for variables outside the linear path."""
   with tf.GradientTape() as tape:
     pred = model((past, fut, tsidx), training=False)
-    loss = tf.reduce_mean(tf.square(pred - ytrue))
+    loss = models.freq_enhanced_loss(ytrue, pred, model.freq_loss_alpha)
   grads = tape.gradient(loss, model.trainable_variables)
   linear_ids = {id(v) for v in model.linear.trainable_variables}
   out = {}
@@ -209,6 +209,15 @@ class TestFixFlag(unittest.TestCase):
       for key, value in current_flags.items():
         setattr(FLAGS, key, value)
       train._verify_or_write_config(folder, train._run_config())
+
+  def test_mismatch_reports_key_with_null_value(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      folder = Path(tmp)
+      config = train._run_config()
+      saved = dict(config, extra_nullable=None)
+      train._verify_or_write_config(folder, saved)
+      with self.assertRaisesRegex(ValueError, 'extra_nullable'):
+        train._verify_or_write_config(folder, config)
 
   def test_resume_legacy_configs_accepted(self):
     for alpha in (0.0, 0.5):
