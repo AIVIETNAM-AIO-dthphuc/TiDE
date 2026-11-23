@@ -1,3 +1,16 @@
+# M08a — Output-Level Temporal Smoother + FreDF for TiDE
+
+## Sơ lược ý tưởng cải tiến
+- **Vấn đề cần cải thiện:** Tầng chiếu cuối `self.linear` và đầu ra của TiDE dự báo từng bước $t=1 \dots H$ theo cơ chế One-Shot độc lập giữa các vị trí, dễ tạo dao động răng cưa giữa các bước liền kề; đồng thời hàm loss `MeanSquaredError` chuẩn chưa xử lý tự tương quan chuỗi nhãn (label autocorrelation).
+- **Ý tưởng cải tiến:**
+  1. Gắn lớp tích chập 1D theo chiều sâu siêu nhẹ **`DepthwiseConv1D`** (`kernel_size=5`, `padding='same'`, `depth_multiplier=1`, `use_bias=False`, `depthwise_initializer='zeros'`) theo cơ chế **residual identity** ngay lên đầu ra dự báo `out` theo trục horizon (chỉ **5 tham số** ở `kernel_size=5`, dùng chung mọi dataset).
+  2. Kết hợp hàm loss miền tần số **FreDF** (`tf.signal.rfft` + chuẩn hóa Parseval $1/\sqrt{H}$ + L1 phức mượt) với trọng số `--freq_alpha=0.5`.
+- **Cơ sở khoa học & Kỳ vọng:** Kế thừa ModernTCN (**ICLR 2024**) về tích chập tách kênh 1D bắt liên tục cục bộ theo thời gian và Wang et al. (**ICLR 2025** — *FreDF*) về khử tự tương quan sai số trong miền tần số. Khởi tạo `zeros` đảm bảo giữ nguyên điểm hội tụ của `RevIN + Linear` ở epoch 0 và tránh hoàn toàn overfitting trên các tập nhỏ như ETT.
+- **Kết quả kiểm chứng nhanh trên Sandbox (`ETTh2 H=96, seed=1`):** Đạt **MAE = `0.333830` (`-0.74%`, tốt nhất trong các biến thể thử nghiệm)** và **MSE = `0.271697` (`+0.48%`)** so với baseline TiDE (`0.270388 / 0.336325`).
+- **Cờ chạy dòng lệnh mới:** `--smooth_kernel_size=5` (`<=0` để tắt), `--freq_alpha=0.5` (trong `[0.0, 1.0]`; `0.0` để tắt).
+
+---
+
 # Long-term Forecasting with TiDE: Time-series Dense Encoder
 
 Authors: Abhimanyu Das, Weihao Kong, Andrew Leach, Shaan Mathur, Rajat Sen and Rose Yu
