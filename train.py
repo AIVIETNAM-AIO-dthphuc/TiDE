@@ -74,6 +74,10 @@ flags.DEFINE_bool('san', False, 'Apply slice-level adaptive normalization (SAN)'
 flags.DEFINE_integer('san_slice_len', 24, 'Slice length T for SAN')
 flags.DEFINE_float('san_lambda', 0.5, 'Weight of auxiliary statistics loss for SAN')
 flags.DEFINE_bool('layer_norm', False, 'Apply layer norm')
+flags.DEFINE_bool(
+    'fix_final_decoder_ln', False,
+    'Disable layer norm in the final decoder (output dim 1), where it zeroes '
+    'all backbone gradients when --layer_norm=true. Default keeps original code.')
 flags.DEFINE_float('dropout_rate', 0.0, 'Dropout rate')
 flags.DEFINE_integer('num_split', 1, 'Number of splits during inference')
 flags.DEFINE_integer('min_num_epochs', 0, 'Minimum epochs before early stopping')
@@ -190,6 +194,8 @@ def _run_config():
   ]
   if FLAGS.san:
     keys.extend(['san', 'san_slice_len', 'san_lambda'])
+  if FLAGS.fix_final_decoder_ln:
+    keys.append('fix_final_decoder_ln')
   config = {key: getattr(FLAGS, key) for key in keys}
   config['run_id'] = FLAGS.run_id
   return config
@@ -376,6 +382,7 @@ def training():
       san=FLAGS.san,
       san_slice_len=FLAGS.san_slice_len,
       san_lambda=FLAGS.san_lambda,
+      fix_final_decoder_ln=FLAGS.fix_final_decoder_ln,
   )
 
   # The decay schedule is unchanged from the supplied original code.
@@ -418,9 +425,10 @@ def training():
     )
 
   logging.info(
-      'Run: dataset=%s seed=%d H=%d san=%s local=%s remote=%s',
+      'Run: dataset=%s seed=%d H=%d san=%s fix_final_decoder_ln=%s local=%s remote=%s',
       drive_dataset, FLAGS.random_seed, FLAGS.pred_len,
       f'{FLAGS.san} (T={FLAGS.san_slice_len}, lambda={FLAGS.san_lambda})' if FLAGS.san else 'False',
+      FLAGS.fix_final_decoder_ln,
       ckpt_dir, backup.remote_snapshots if backup else '[disabled]',
   )
   if bool(finished.numpy()):
