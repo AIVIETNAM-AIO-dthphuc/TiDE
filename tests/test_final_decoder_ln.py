@@ -183,7 +183,10 @@ class TestFixFlag(unittest.TestCase):
 
   def test_run_config_without_fix_has_no_key(self):
     FLAGS.fix_final_decoder_ln = False
-    self.assertNotIn('fix_final_decoder_ln', train._run_config())
+    for san in (False, True):
+      with self.subTest(san=san):
+        FLAGS.san = san
+        self.assertNotIn('fix_final_decoder_ln', train._run_config())
 
   def test_run_config_with_fix_has_key(self):
     FLAGS.fix_final_decoder_ln = True
